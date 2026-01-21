@@ -1,0 +1,19 @@
+{
+  "name": "pi-messenger",
+  "version": "0.4.0",
+  "description": "Inter-agent messaging and file reservation system for pi coding agent",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "messaging",
+    "multi-agent",
+    "coordination"
+  ],
+  "author": "Nico Bailon",
+  "license": "MIT"
+}
