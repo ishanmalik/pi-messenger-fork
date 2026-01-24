@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 - 2026-01-23
+
+### Added
+
+- **Planning Workflow Documentation** - README now explains how the `plan` action works:
+  - Diagram showing scouts (parallel) → gap-analyst → tasks with dependencies
+  - Clarifies that no special format is required for PRDs/specs
+  - Example of starting from a PRD with `idea: true`
+
 ## 0.6.0 - 2026-01-23
 
 ### Added

@@ -149,6 +149,57 @@ pi_messenger({ action: "review", target: "c-1-abc.1" })
 
 > **Note:** Crew agents are auto-installed on first use of `plan`, `work`, or `review`.
 
+### Planning Workflow
+
+The `plan` action orchestrates a multi-agent analysis:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Your Project                                                    │
+│  ├── PRD.md            ◄── Scouts discover and read these       │
+│  ├── DESIGN.md                                                   │
+│  ├── src/                                                        │
+│  └── ...                                                         │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Phase 1: Scouts (parallel)                                      │
+│  ├── crew-repo-scout      → Analyzes codebase structure          │
+│  ├── crew-docs-scout      → Reads project documentation          │
+│  ├── crew-practice-scout  → Finds similar patterns               │
+│  ├── crew-github-scout    → Checks issues/PRs if available       │
+│  └── ... (7 scouts total)                                        │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Phase 2: Gap Analyst                                            │
+│  └── Synthesizes findings → Creates task breakdown               │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Result: Tasks with Dependencies                                 │
+│  ├── c-1-abc.1: Setup types        (no deps)                    │
+│  ├── c-1-abc.2: Core logic         (depends on 1)               │
+│  ├── c-1-abc.3: API endpoints      (depends on 1)               │
+│  └── c-1-abc.4: Tests              (depends on 2, 3)            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**No special format required** - just put your docs in the project. Scouts will find and read markdown files, READMEs, and code comments. The gap-analyst handles the task decomposition.
+
+```typescript
+// Example: Start with a PRD
+// 1. Copy your PRD into the project
+// 2. Create epic from idea
+pi_messenger({ action: "plan", target: "Build OAuth login per PRD.md", idea: true })
+// → Scouts analyze PRD.md + codebase
+// → Gap-analyst creates 5 tasks with dependencies
+// → Ready for work!
+```
+
 ### Autonomous Mode
 
 Run tasks continuously until completion:
