@@ -32,6 +32,7 @@ import { discoverCrewAgents } from "./crew/utils/discover.js";
 import { loadConfig } from "./config.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import { getLobbyWorkerCount } from "./crew/lobby.js";
+import { getAllSpawned } from "./crew/orchestrator/registry.js";
 import type { CrewViewState } from "./overlay-actions.js";
 
 const STATUS_ICONS: Record<string, string> = { done: "✓", in_progress: "●", todo: "○", blocked: "✗" };
@@ -302,6 +303,8 @@ export function renderAgentsRow(
   const allClaims = store.getClaims(dirs);
   const rowParts: string[] = [];
   const seen = new Set<string>();
+  const spawned = getAllSpawned(cwd);
+  const spawnedByName = new Map(spawned.map(agent => [agent.name, agent] as const));
 
   const self = buildSelfRegistration(state);
   rowParts.push(`🟢 You (${idleLabel(self.activity?.lastActivityAt ?? self.startedAt)})`);
@@ -317,7 +320,9 @@ export function renderAgentsRow(
     );
     const indicator = STATUS_INDICATORS[computed.status];
     const idle = computed.idleFor ? ` ${computed.idleFor}` : "";
-    rowParts.push(`${indicator} ${coloredAgentName(agent.name)}${idle}`);
+    const orchState = spawnedByName.get(agent.name)?.status;
+    const orchLabel = orchState ? ` [${orchState}]` : "";
+    rowParts.push(`${indicator} ${coloredAgentName(agent.name)}${idle}${orchLabel}`);
     seen.add(agent.name);
   }
 
@@ -325,6 +330,12 @@ export function renderAgentsRow(
     if (seen.has(worker.taskId)) continue;
     rowParts.push(`🔵 ${worker.name} ${formatTaskLabel(worker.taskId)}`);
     seen.add(worker.taskId);
+  }
+
+  for (const orch of spawned) {
+    if (seen.has(orch.name) || orch.status === "dead") continue;
+    rowParts.push(`🧭 ${orch.name} [${orch.status}]`);
+    seen.add(orch.name);
   }
 
   return truncateToWidth(rowParts.join("  "), width);
