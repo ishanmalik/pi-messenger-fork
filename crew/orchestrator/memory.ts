@@ -524,6 +524,7 @@ export async function remember(
     model: store.config.embeddingModel,
     dimensions: store.config.dimensions,
     timeoutMs: store.config.embeddingTimeoutMs,
+    taskType: "RETRIEVAL_DOCUMENT",
   });
 
   if (!embedded.ok || embedded.vector.length === 0) {
@@ -601,6 +602,7 @@ export async function recall(
     model: store.config.embeddingModel,
     dimensions: store.config.dimensions,
     timeoutMs: store.config.embeddingTimeoutMs,
+    taskType: "RETRIEVAL_QUERY",
   });
 
   if (!embedded.ok || embedded.vector.length === 0) {
