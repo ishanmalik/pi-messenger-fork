@@ -100,6 +100,11 @@ export interface CrewParams {
   autonomous?: boolean;
   concurrency?: number;
   model?: string;
+  thinking?: string;
+
+  // Orchestrator
+  task?: string;
+  lines?: number;
 
   // Task reset
   cascade?: boolean;

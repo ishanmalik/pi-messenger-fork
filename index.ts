@@ -369,7 +369,17 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl`,
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl
+
+  // Orchestrator
+  pi_messenger({ action: "spawn", model: "openai-codex/gpt-5.3-codex", name: "Builder", thinking: "xhigh" })
+  pi_messenger({ action: "agents.list" })
+  pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement X" })
+  pi_messenger({ action: "agents.check", name: "Builder" })
+  pi_messenger({ action: "agents.logs", name: "Builder" })
+  pi_messenger({ action: "agents.kill", name: "Builder" })
+  pi_messenger({ action: "agents.killall" })
+  pi_messenger({ action: "agents.memory.stats" })`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -405,6 +415,9 @@ Usage (action-based API - preferred):
       autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
+      thinking: Type.Optional(Type.String({ description: "Thinking level override (e.g., high, xhigh)" })),
+      task: Type.Optional(Type.String({ description: "Task description for agents.assign" })),
+      lines: Type.Optional(Type.Number({ description: "Number of lines for agents.logs (default 50)" })),
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
