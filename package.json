@@ -44,7 +44,14 @@
     "vitest": "^2.1.8"
   },
   "pi": {
-    "extensions": ["./index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "dependencies": {
+    "@zvec/zvec": "^0.2.0"
   }
 }

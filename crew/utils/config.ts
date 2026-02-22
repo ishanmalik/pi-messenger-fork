@@ -72,6 +72,33 @@ export interface CrewConfig {
   dependencies: "advisory" | "strict";
   coordination: CoordinationLevel;
   messageBudgets: Record<CoordinationLevel, number>;
+  orchestrator: {
+    defaultModel: string;
+    defaultThinking: string;
+    idleTimeoutMs: number;
+    autoKillOnDone: boolean;
+    gracePeriodMs: number;
+    maxSpawnedAgents: number;
+    spawnTimeoutMs: number;
+    messageBudget: number;
+    memory: {
+      enabled: boolean;
+      embeddingModel: string;
+      embeddingProvider: string;
+      dimensions: number;
+      maxEntries: number;
+      autoInjectTopK: number;
+      minSimilarity: number;
+      maxInjectionTokens: number;
+      embeddingTimeoutMs: number;
+      ttlDays: {
+        message: number;
+        discovery: number;
+        summary: number;
+        decision: number;
+      };
+    };
+  };
 }
 
 const DEFAULT_CONFIG: CrewConfig = {
@@ -94,6 +121,33 @@ const DEFAULT_CONFIG: CrewConfig = {
   dependencies: "advisory",
   coordination: "chatty",
   messageBudgets: { none: 0, minimal: 2, moderate: 5, chatty: 10 },
+  orchestrator: {
+    defaultModel: "anthropic/claude-sonnet-4-6",
+    defaultThinking: "high",
+    idleTimeoutMs: 300000,
+    autoKillOnDone: true,
+    gracePeriodMs: 15000,
+    maxSpawnedAgents: 5,
+    spawnTimeoutMs: 30000,
+    messageBudget: 100,
+    memory: {
+      enabled: true,
+      embeddingModel: "text-embedding-3-small",
+      embeddingProvider: "openai",
+      dimensions: 1536,
+      maxEntries: 10000,
+      autoInjectTopK: 3,
+      minSimilarity: 0.3,
+      maxInjectionTokens: 2000,
+      embeddingTimeoutMs: 2000,
+      ttlDays: {
+        message: 7,
+        discovery: 30,
+        summary: 90,
+        decision: 90,
+      },
+    },
+  },
 };
 
 function loadJson(filePath: string): Record<string, unknown> {
