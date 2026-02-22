@@ -103,6 +103,43 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+function parsePid(raw: unknown): number | null {
+  const pid = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  return Math.floor(pid);
+}
+
+function readParentPid(pid: number): number | null {
+  try {
+    const output = String(execFileSync(
+      "ps",
+      ["-o", "ppid=", "-p", String(pid)],
+      { encoding: "utf-8" },
+    )).trim();
+    const parsed = Number(output);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDescendantPid(pid: number, ancestorPid: number): boolean {
+  if (!Number.isFinite(pid) || !Number.isFinite(ancestorPid)) return false;
+  if (pid <= 0 || ancestorPid <= 0) return false;
+  if (pid === ancestorPid) return true;
+
+  let current = pid;
+  for (let depth = 0; depth < 32; depth++) {
+    const parent = readParentPid(current);
+    if (!parent || parent <= 1) return false;
+    if (parent === ancestorPid) return true;
+    if (parent === current) return false;
+    current = parent;
+  }
+
+  return false;
+}
+
 function cleanupTmux(agent: SpawnedAgent): void {
   if (!agent.tmuxPaneId) return;
   try {
@@ -158,13 +195,23 @@ function shouldReap(agent: SpawnedAgent): string | null {
     return "pid_exited";
   }
 
+  // While still spawning, allow mesh registration to appear asynchronously.
+  // Do not reap on missing/mismatched mesh until startup completes.
+  if (agent.status === "spawning") {
+    return null;
+  }
+
   const reg = findMeshRegistration(agent.name);
   if (!reg) {
     return "mesh_missing";
   }
 
-  const meshPid = typeof reg.pid === "number" ? reg.pid : Number(reg.pid);
-  if (!Number.isFinite(meshPid) || meshPid !== agent.pid) {
+  const meshPid = parsePid(reg.pid);
+  if (!meshPid) {
+    return "mesh_pid_mismatch";
+  }
+
+  if (meshPid !== agent.pid && !isDescendantPid(meshPid, agent.pid)) {
     return "mesh_pid_mismatch";
   }
 

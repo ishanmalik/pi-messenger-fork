@@ -89,4 +89,14 @@ describe("crew/orchestrator/registry", () => {
     expect(reaped).toEqual(["Ghost"]);
     expect(fs.existsSync(filePath)).toBe(false);
   });
+
+  it("does not reap spawning agents that have not joined mesh yet", () => {
+    registerSpawned(sample({ name: "Booting", status: "spawning", pid: process.pid }), cwd);
+
+    const reaped = reapOrphans(cwd);
+    const filePath = path.join(cwd, ".pi", "messenger", "orchestrator", "agents", "Booting.json");
+
+    expect(reaped).toEqual([]);
+    expect(fs.existsSync(filePath)).toBe(true);
+  });
 });
