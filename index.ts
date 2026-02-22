@@ -819,7 +819,7 @@ Usage (action-based API - preferred):
       } catch (error) {
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `Memory store failed to initialize: ${error instanceof Error ? error.message : "unknown"}. Memory disabled.",
+            `Memory store failed to initialize: ${error instanceof Error ? error.message : "unknown"}. Memory disabled.`,
             "warning",
           );
         }
