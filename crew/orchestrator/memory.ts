@@ -18,11 +18,30 @@ const SCHEMA_VERSION = 2;
 const CIRCUIT_BREAKER_FAILURES = 3;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
 const MAX_AGENT_SHARE = 0.4;
+const CORRUPTION_HINTS = [
+  "corrupt",
+  "corruption",
+  "idmap",
+  "manifest",
+  "sst",
+  "rocksdb",
+  "invalid checksum",
+  "unable to read",
+  "index",
+];
 
 let activeStore: MemoryStore | null = null;
 let zvecRuntimeCache: Record<string, unknown> | null | undefined;
 
 class SchemaMismatchError extends Error {}
+class HealthcheckError extends Error {
+  readonly healthError: string;
+
+  constructor(healthError: string) {
+    super(`healthcheck_failed: ${healthError}`);
+    this.healthError = healthError;
+  }
+}
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
@@ -43,6 +62,24 @@ function memoryDir(projectDir: string): string {
 
 function metadataPath(collectionPath: string): string {
   return join(collectionPath, "orchestrator-meta.json");
+}
+
+function backupRoot(projectDir: string): string {
+  return join(projectDir, ".pi", "messenger", "orchestrator", "memory-backups");
+}
+
+function timestampTag(date = new Date()): string {
+  const iso = date.toISOString();
+  return iso.replace(/[:.]/g, "-");
+}
+
+function sanitizeSuffix(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 64) || "unknown";
 }
 
 function safeParseJson<T>(value: string): T | null {
@@ -66,6 +103,40 @@ function contentHash(text: string): string {
 
 function escapeFilterValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/\"/g, "\\\"");
+}
+
+function isCorruptionSignal(reason: string): boolean {
+  const normalized = reason.toLowerCase();
+  if (normalized.includes("query_failed")) return true;
+  return CORRUPTION_HINTS.some(hint => normalized.includes(hint));
+}
+
+function backupAndResetCollectionPath(projectDir: string, collectionPath: string, reason: string): string | null {
+  if (!fs.existsSync(collectionPath)) return null;
+
+  const backupDir = backupRoot(projectDir);
+  ensureDir(backupDir);
+
+  const backupPath = join(
+    backupDir,
+    `${timestampTag()}-${sanitizeSuffix(reason)}`,
+  );
+
+  ensureDir(dirname(backupPath));
+  fs.renameSync(collectionPath, backupPath);
+  return backupPath;
+}
+
+function isErrorWithMessage(error: unknown): error is Error {
+  return error instanceof Error && typeof error.message === "string";
+}
+
+function isLikelyCorruptionError(error: unknown): boolean {
+  if (!isErrorWithMessage(error)) return false;
+  if (error instanceof HealthcheckError) {
+    return isCorruptionSignal(error.healthError);
+  }
+  return isCorruptionSignal(error.message);
 }
 
 function isMemoryType(value: unknown): value is MemoryType {
@@ -290,6 +361,36 @@ function runHealthCheck(store: MemoryStore): { ok: boolean; error?: string } {
   const hash = contentHash(`health:${id}`);
   const vector = probeVector(store.config.dimensions);
 
+  const cleanup = () => {
+    try { store.collection?.deleteSync(id); } catch {}
+  };
+
+  const queryForInsertedDoc = (): boolean => {
+    try {
+      const topk = Math.max(8, Math.min(64, Math.max(1, store.collection?.stats?.docCount ?? 0)));
+      const byVector = store.collection?.querySync({
+        fieldName: VECTOR_FIELD,
+        vector,
+        topk,
+        outputFields: ["contentHash"],
+      }) ?? [];
+
+      if (byVector.some(doc => doc.fields?.contentHash === hash)) {
+        return true;
+      }
+
+      const byScalar = store.collection?.querySync({
+        filter: `contentHash = "${escapeFilterValue(hash)}"`,
+        topk: 8,
+        outputFields: ["contentHash"],
+      }) ?? [];
+
+      return byScalar.some(doc => doc.fields?.contentHash === hash);
+    } catch {
+      return false;
+    }
+  };
+
   try {
     const status = store.collection.insertSync({
       id,
@@ -312,25 +413,28 @@ function runHealthCheck(store: MemoryStore): { ok: boolean; error?: string } {
     }) as { ok?: boolean; message?: string };
 
     if (!status || status.ok !== true) {
+      cleanup();
       return { ok: false, error: status?.message || "insert_failed" };
     }
 
-    const queried = store.collection.querySync({
-      fieldName: VECTOR_FIELD,
-      vector,
-      topk: 1,
-      filter: `contentHash = "${escapeFilterValue(hash)}"`,
-      outputFields: ["contentHash"],
-    });
-
-    if (!Array.isArray(queried) || queried.length === 0) {
-      return { ok: false, error: "query_failed" };
+    if (queryForInsertedDoc()) {
+      cleanup();
+      return { ok: true };
     }
 
-    store.collection.deleteSync(id);
-    return { ok: true };
+    try {
+      store.collection.optimizeSync();
+    } catch {}
+
+    if (queryForInsertedDoc()) {
+      cleanup();
+      return { ok: true };
+    }
+
+    cleanup();
+    return { ok: false, error: "query_failed" };
   } catch (error) {
-    try { store.collection.deleteSync(id); } catch {}
+    cleanup();
     return { ok: false, error: error instanceof Error ? error.message : "healthcheck_failed" };
   }
 }
@@ -461,6 +565,58 @@ function hasContentHash(store: MemoryStore, hash: string): boolean {
   }
 }
 
+function initializeCollection(store: MemoryStore, runtime: Record<string, unknown>): void {
+  const collectionPath = store.collectionPath;
+  const collection = openCollection(runtime, collectionPath, store.config);
+  validateCollectionShape(collection, store.config);
+  validateMetadata(collectionPath, store.config);
+
+  store.collection = collection;
+  store.degraded = false;
+  store.reason = undefined;
+
+  const health = runHealthCheck(store);
+  if (!health.ok) {
+    throw new HealthcheckError(health.error ?? "unknown");
+  }
+
+  pruneExpired(store, store.config.ttlDays);
+}
+
+function attemptSelfHeal(
+  store: MemoryStore,
+  runtime: Record<string, unknown>,
+  reason: string,
+): { ok: boolean; backupPath?: string; error?: string } {
+  closeMemory(store);
+
+  let backupPath: string | null = null;
+  try {
+    backupPath = backupAndResetCollectionPath(store.projectDir, store.collectionPath, reason);
+  } catch (error) {
+    return {
+      ok: false,
+      error: `backup_failed:${isErrorWithMessage(error) ? error.message : "unknown"}`,
+    };
+  }
+
+  try {
+    initializeCollection(store, runtime);
+    console.warn(`[pi-messenger][orchestrator] memory self-healed after '${reason}'${backupPath ? ` (backup: ${backupPath})` : ""}`);
+    return {
+      ok: true,
+      ...(backupPath ? { backupPath } : {}),
+    };
+  } catch (error) {
+    closeMemory(store);
+    return {
+      ok: false,
+      ...(backupPath ? { backupPath } : {}),
+      error: isErrorWithMessage(error) ? error.message : "reinit_failed",
+    };
+  }
+}
+
 export async function initMemory(projectDir: string, config: MemoryConfig): Promise<MemoryStore> {
   const store = createStore(projectDir, config);
 
@@ -478,25 +634,7 @@ export async function initMemory(projectDir: string, config: MemoryConfig): Prom
   }
 
   try {
-    const collectionPath = store.collectionPath;
-    const collection = openCollection(runtime, collectionPath, config);
-    validateCollectionShape(collection, config);
-    validateMetadata(collectionPath, config);
-
-    store.collection = collection;
-    store.degraded = false;
-    store.reason = undefined;
-
-    const health = runHealthCheck(store);
-    if (!health.ok) {
-      closeMemory(store);
-      store.degraded = true;
-      store.reason = `healthcheck_failed${health.error ? `: ${health.error}` : ""}`;
-      activeStore = store;
-      return store;
-    }
-
-    pruneExpired(store, config.ttlDays);
+    initializeCollection(store, runtime);
     activeStore = store;
     return store;
   } catch (error) {
@@ -504,6 +642,25 @@ export async function initMemory(projectDir: string, config: MemoryConfig): Prom
 
     if (error instanceof SchemaMismatchError) {
       throw error;
+    }
+
+    if (isLikelyCorruptionError(error)) {
+      const reason = error instanceof HealthcheckError
+        ? `healthcheck_failed:${error.healthError}`
+        : (error instanceof Error ? error.message : "memory_corruption_detected");
+
+      const healed = attemptSelfHeal(store, runtime, reason);
+      if (healed.ok) {
+        store.degraded = false;
+        store.reason = undefined;
+        activeStore = store;
+        return store;
+      }
+
+      store.degraded = true;
+      store.reason = `self_heal_failed: ${healed.error ?? reason}`;
+      activeStore = store;
+      return store;
     }
 
     store.degraded = true;
