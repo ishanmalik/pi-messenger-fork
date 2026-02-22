@@ -22,6 +22,7 @@ export interface SpawnedAgent {
   spawnedAt: number;
   spawnedBy: string;
   assignedTask: string | null;
+  currentWorkstream?: string | null;
   lastActivityAt: number;
   backend: SpawnBackend;
 }
@@ -66,6 +67,7 @@ export interface MemoryEntry {
   timestamp: string;
   createdAtMs: number;
   taskId?: string;
+  workstream?: string;
   files?: string[];
   contentHash: string;
   similarity: number;
@@ -79,6 +81,7 @@ export interface MemoryStats {
   docCount: number;
   byType: Record<MemoryType, number>;
   byAgent: Record<string, number>;
+  byWorkstream: Record<string, number>;
   circuitBreakerOpen: boolean;
   circuitBreakerOpenUntil: number | null;
   circuitBreakerSecondsRemaining: number;

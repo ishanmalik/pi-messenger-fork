@@ -104,6 +104,7 @@ export interface CrewParams {
 
   // Orchestrator
   profile?: string;
+  workstream?: string;
   task?: string;
   lines?: number;
 

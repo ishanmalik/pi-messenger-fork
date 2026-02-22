@@ -14,7 +14,7 @@ import type {
 
 const COLLECTION_NAME = "orchestrator_memory";
 const VECTOR_FIELD = "embedding";
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const CIRCUIT_BREAKER_FAILURES = 3;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
 const MAX_AGENT_SHARE = 0.4;
@@ -124,6 +124,7 @@ function defaultStats(store: MemoryStore): MemoryStats {
       decision: 0,
     },
     byAgent: {},
+    byWorkstream: {},
     circuitBreakerOpen: breakerOpen(store),
     circuitBreakerOpenUntil: store.breakerOpenUntil || null,
     circuitBreakerSecondsRemaining: Math.max(0, Math.ceil((store.breakerOpenUntil - Date.now()) / 1000)),
@@ -162,11 +163,17 @@ async function getZvecRuntime(): Promise<Record<string, unknown> | null> {
 }
 
 function runtimeOrThrow(runtime: Record<string, unknown>, key: string): unknown {
-  const value = runtime[key];
-  if (!value) {
-    throw new Error(`zvec runtime missing ${key}`);
+  const direct = runtime[key];
+  if (direct) {
+    return direct;
   }
-  return value;
+
+  const nested = (runtime.default as Record<string, unknown> | undefined)?.[key];
+  if (nested) {
+    return nested;
+  }
+
+  throw new Error(`zvec runtime missing ${key}`);
 }
 
 function createSchema(runtime: Record<string, unknown>, config: MemoryConfig): unknown {
@@ -193,6 +200,7 @@ function createSchema(runtime: Record<string, unknown>, config: MemoryConfig): u
       { name: "timestamp", dataType: ZVecDataType.STRING },
       { name: "createdAtMs", dataType: ZVecDataType.INT64 },
       { name: "taskId", dataType: ZVecDataType.STRING },
+      { name: "workstream", dataType: ZVecDataType.STRING },
       { name: "files", dataType: ZVecDataType.STRING },
       { name: "contentHash", dataType: ZVecDataType.STRING },
       { name: "schemaVersion", dataType: ZVecDataType.INT32 },
@@ -293,6 +301,7 @@ function runHealthCheck(store: MemoryStore): { ok: boolean; error?: string } {
         timestamp: new Date(now).toISOString(),
         createdAtMs: now,
         taskId: "",
+        workstream: "",
         files: "[]",
         contentHash: hash,
         schemaVersion: SCHEMA_VERSION,
@@ -342,7 +351,11 @@ function queryAll(store: MemoryStore, outputFields: string[]): ZVecDoc[] {
   }
 }
 
-function buildFilter(agentFilter?: string, typeFilter?: MemoryType[]): string | undefined {
+function buildFilter(
+  agentFilter?: string,
+  typeFilter?: MemoryType[],
+  workstreamFilter?: string,
+): string | undefined {
   const parts: string[] = [];
 
   if (agentFilter) {
@@ -354,6 +367,10 @@ function buildFilter(agentFilter?: string, typeFilter?: MemoryType[]): string | 
     if (unique.length > 0) {
       parts.push(`(${unique.map(type => `type = \"${escapeFilterValue(type)}\"`).join(" OR ")})`);
     }
+  }
+
+  if (workstreamFilter && workstreamFilter.trim()) {
+    parts.push(`workstream = "${escapeFilterValue(workstreamFilter.trim())}"`);
   }
 
   if (parts.length === 0) return undefined;
@@ -499,7 +516,14 @@ export async function initMemory(projectDir: string, config: MemoryConfig): Prom
 export async function remember(
   store: MemoryStore,
   text: string,
-  metadata: { agent: string; type: MemoryType; source: string; taskId?: string; files?: string[] },
+  metadata: {
+    agent: string;
+    type: MemoryType;
+    source: string;
+    taskId?: string;
+    workstream?: string;
+    files?: string[];
+  },
 ): Promise<{ ok: boolean; degraded?: boolean; error?: string }> {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -553,6 +577,7 @@ export async function remember(
         timestamp: new Date(now).toISOString(),
         createdAtMs: now,
         taskId: metadata.taskId ?? "",
+        workstream: metadata.workstream?.trim() ?? "",
         files: JSON.stringify(metadata.files ?? []),
         contentHash: hash,
         schemaVersion: SCHEMA_VERSION,
@@ -582,6 +607,7 @@ export async function recall(
     maxTokens?: number;
     agentFilter?: string;
     typeFilter?: MemoryType[];
+    workstreamFilter?: string;
   },
 ): Promise<{ results: MemoryEntry[]; degraded?: boolean }> {
   const text = query.trim();
@@ -620,7 +646,7 @@ export async function recall(
   const topk = Math.max(1, options?.topk ?? store.config.autoInjectTopK);
   const minSimilarity = options?.minSimilarity ?? store.config.minSimilarity;
   const maxTokens = Math.max(1, options?.maxTokens ?? store.config.maxInjectionTokens);
-  const filter = buildFilter(options?.agentFilter, options?.typeFilter);
+  const filter = buildFilter(options?.agentFilter, options?.typeFilter, options?.workstreamFilter);
 
   try {
     const docs = store.collection.querySync({
@@ -635,6 +661,7 @@ export async function recall(
         "timestamp",
         "createdAtMs",
         "taskId",
+        "workstream",
         "files",
         "contentHash",
         "text",
@@ -658,6 +685,9 @@ export async function recall(
         timestamp: typeof fields.timestamp === "string" ? fields.timestamp : new Date(createdAtMs || Date.now()).toISOString(),
         createdAtMs,
         taskId: typeof fields.taskId === "string" && fields.taskId.length > 0 ? fields.taskId : undefined,
+        workstream: typeof fields.workstream === "string" && fields.workstream.length > 0
+          ? fields.workstream
+          : undefined,
         files: parseFiles(fields.files),
         contentHash: typeof fields.contentHash === "string" ? fields.contentHash : "",
         similarity,
@@ -738,7 +768,7 @@ export function getMemoryStats(store: MemoryStore): MemoryStats {
   if (!store.collection) return stats;
 
   stats.docCount = Math.max(0, store.collection.stats?.docCount ?? 0);
-  const docs = queryAll(store, ["type", "agent"]);
+  const docs = queryAll(store, ["type", "agent", "workstream"]);
 
   for (const doc of docs) {
     const fields = doc.fields ?? {};
@@ -746,9 +776,13 @@ export function getMemoryStats(store: MemoryStore): MemoryStats {
     const agent = typeof fields.agent === "string" && fields.agent.length > 0
       ? fields.agent
       : "unknown";
+    const workstream = typeof fields.workstream === "string" && fields.workstream.length > 0
+      ? fields.workstream
+      : "(none)";
 
     stats.byType[type] += 1;
     stats.byAgent[agent] = (stats.byAgent[agent] ?? 0) + 1;
+    stats.byWorkstream[workstream] = (stats.byWorkstream[workstream] ?? 0) + 1;
   }
 
   return stats;

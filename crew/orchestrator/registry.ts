@@ -63,6 +63,7 @@ function isSpawnedAgent(value: unknown): value is SpawnedAgent {
     && typeof v.spawnedAt === "number"
     && typeof v.spawnedBy === "string"
     && (typeof v.assignedTask === "string" || v.assignedTask === null)
+    && (v.currentWorkstream === undefined || typeof v.currentWorkstream === "string" || v.currentWorkstream === null)
     && typeof v.lastActivityAt === "number"
     && (v.backend === "tmux" || v.backend === "headless");
 }

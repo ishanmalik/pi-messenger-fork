@@ -291,6 +291,12 @@ function resolveThinking(params: CrewParams, defaultThinking: string): string {
   return defaultThinking;
 }
 
+function resolveWorkstream(params: CrewParams): string | null {
+  if (typeof params.workstream !== "string") return null;
+  const normalized = params.workstream.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
 function resolveLines(params: CrewParams, fallback = 50): number {
   const p = params as Record<string, unknown>;
   const lines = typeof p.lines === "number" ? p.lines : fallback;
@@ -315,6 +321,7 @@ async function maybeBootstrapMemory(
   targetName: string,
   userPrompt: string | undefined,
   topk: number,
+  workstream: string | null,
 ): Promise<number> {
   const query = userPrompt?.trim() ?? "";
   if (!query) return 0;
@@ -322,7 +329,10 @@ async function maybeBootstrapMemory(
   const store = await ensureMemory(cwd);
   if (!store || !store.enabled || store.degraded) return 0;
 
-  const recalled = await recall(store, query, { topk });
+  const recalled = await recall(store, query, {
+    topk,
+    ...(workstream ? { workstreamFilter: workstream } : {}),
+  });
   if (recalled.results.length === 0) return 0;
 
   const lines = recalled.results.map((entry) => {
@@ -366,6 +376,7 @@ export async function executeSpawn(
 
   const model = params.model?.trim() || profileModel?.model || config.orchestrator.defaultModel;
   const thinking = resolveThinking(params, config.orchestrator.defaultThinking);
+  const spawnWorkstream = resolveWorkstream(params);
   const name = resolveSpawnName(params.name, dirs, cwd);
 
   if (!name) {
@@ -469,6 +480,7 @@ export async function executeSpawn(
     spawnedAt: now,
     spawnedBy: orchestratorName,
     assignedTask: null,
+    currentWorkstream: spawnWorkstream,
     lastActivityAt: now,
     backend,
   }, cwd);
@@ -512,6 +524,7 @@ export async function executeSpawn(
         name,
         params.prompt,
         config.orchestrator.memory.autoInjectTopK,
+        spawnWorkstream,
       );
     } catch {
       memoryInjected = 0;
@@ -532,6 +545,7 @@ export async function executeSpawn(
       memoryInjected,
       profile: profileModel?.profile ?? requestedProfile ?? null,
       profileFile: profileModel?.filePath ?? null,
+      workstream: spawnWorkstream,
     },
   }, cwd);
   logFeedEvent(cwd, state.agentName, "message", name, `spawned ${name} (${backend})`);
@@ -553,6 +567,7 @@ export async function executeSpawn(
       memoryInjected,
       profile: profileModel?.profile ?? null,
       profileFile: profileModel?.filePath ?? null,
+      workstream: spawnWorkstream,
     },
   );
 }
@@ -572,11 +587,12 @@ function formatAgentStatusLine(agent: SpawnedAgent, mesh: Record<string, unknown
   const tokens = Number(session?.tokens ?? 0) || 0;
   const tokenText = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
   const taskText = agent.assignedTask ? `assigned: "${agent.assignedTask}"` : agent.status;
+  const workstreamText = agent.currentWorkstream ? ` [${agent.currentWorkstream}]` : "";
   const tmuxText = agent.backend === "tmux"
     ? `tmux:${agent.tmuxPaneId ?? "?"}`
     : "headless";
 
-  return `${icon[agent.status]} ${agent.name} (${formatModelLabel(agent)}) — ${taskText} — ${tools} tools, ${tokenText} tokens — ${tmuxText}`;
+  return `${icon[agent.status]} ${agent.name} (${formatModelLabel(agent)})${workstreamText} — ${taskText} — ${tools} tools, ${tokenText} tokens — ${tmuxText}`;
 }
 
 export async function executeAgentsList(
@@ -638,6 +654,7 @@ async function captureKillSummaryIfNeeded(
     type: "summary",
     source: "agents.kill",
     taskId: agent.assignedTask,
+    workstream: agent.currentWorkstream ?? undefined,
   });
 }
 
@@ -915,6 +932,8 @@ export async function executeAgentsAssign(
     });
   }
 
+  const workstream = resolveWorkstream(params) ?? latest.currentWorkstream ?? null;
+
   let memoryContext = "";
   let memoryCount = 0;
   if (config.orchestrator.memory.enabled) {
@@ -925,6 +944,7 @@ export async function executeAgentsAssign(
           topk: config.orchestrator.memory.autoInjectTopK,
           minSimilarity: config.orchestrator.memory.minSimilarity,
           maxTokens: config.orchestrator.memory.maxInjectionTokens,
+          ...(workstream ? { workstreamFilter: workstream } : {}),
         });
         if (recalled.results.length > 0) {
           memoryCount = recalled.results.length;
@@ -940,7 +960,8 @@ export async function executeAgentsAssign(
     }
   }
 
-  const assignmentDM = `# Task Assignment\n\n${memoryContext}## Your Task\n${task}\n\n## When Done\nCall: pi_messenger({ action: "agents.done", summary: "Brief description of what you did" })`;
+  const workstreamBlock = workstream ? `## Workstream\n${workstream}\n\n` : "";
+  const assignmentDM = `# Task Assignment\n\n${workstreamBlock}${memoryContext}## Your Task\n${task}\n\n## When Done\nCall: pi_messenger({ action: "agents.done", summary: "Brief description of what you did" })`;
 
   try {
     messengerStore.sendMessageToAgent(state, dirs, name, assignmentDM);
@@ -956,6 +977,7 @@ export async function executeAgentsAssign(
     ...latest,
     status: "assigned",
     assignedTask: task,
+    currentWorkstream: workstream,
     lastActivityAt: Date.now(),
   }, cwd);
 
@@ -963,15 +985,21 @@ export async function executeAgentsAssign(
     event: "assign",
     agent: name,
     timestamp: new Date().toISOString(),
-    details: { task, memoryContextInjected: memoryCount > 0, memoryContextCount: memoryCount },
+    details: {
+      task,
+      workstream,
+      memoryContextInjected: memoryCount > 0,
+      memoryContextCount: memoryCount,
+    },
   }, cwd);
   logFeedEvent(cwd, state.agentName, "message", name, `assigned task: ${task.slice(0, 120)}`);
 
-  return result(`Assigned task to ${name}.${memoryCount > 0 ? ` Injected ${memoryCount} memory snippet(s).` : ""}`, {
+  return result(`Assigned task to ${name}.${memoryCount > 0 ? ` Injected ${memoryCount} memory snippet(s).` : ""}${workstream ? ` (workstream: ${workstream})` : ""}`, {
     mode: "agents.assign",
     name,
     assigned: true,
     task,
+    workstream,
     memoryContextInjected: memoryCount > 0,
     memoryContextCount: memoryCount,
   });
@@ -1015,6 +1043,7 @@ export async function executeAgentsDone(
           type: "summary",
           source: "agents.done",
           taskId: agent.assignedTask ?? undefined,
+          workstream: agent.currentWorkstream ?? undefined,
           files: state.session.filesModified,
         });
       }
@@ -1046,6 +1075,7 @@ export async function executeAgentsDone(
       ...agent,
       status: "idle",
       assignedTask: null,
+      currentWorkstream: null,
       lastActivityAt: Date.now(),
     }, cwd);
 
@@ -1128,6 +1158,7 @@ export async function executeAgentsCheck(
   lines.push(`Status: ${alive ? agent.status : "dead"}`);
   lines.push(`Model: ${formatModelLabel(agent)}`);
   lines.push(`Task: ${agent.assignedTask ?? "(none)"}`);
+  lines.push(`Workstream: ${agent.currentWorkstream ?? "(none)"}`);
   lines.push(`Uptime: ${uptime}`);
   lines.push(`Activity: ${currentActivity} (${activityAgo})`);
   lines.push(`Tools: ${toolCalls} calls, ${tokenText} tokens`);
@@ -1141,6 +1172,7 @@ export async function executeAgentsCheck(
     status: alive ? agent.status : "dead",
     model: formatModelLabel(agent),
     assignedTask: agent.assignedTask,
+    workstream: agent.currentWorkstream ?? null,
     uptime,
     activity: {
       current: currentActivity,

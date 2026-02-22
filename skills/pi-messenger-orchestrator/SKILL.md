@@ -16,12 +16,16 @@ pi_messenger({ action: "join" })
 
 ### 2. Spawn a Worker
 ```typescript
+// Explicit model/provider
 pi_messenger({ action: "spawn", model: "openai-codex/gpt-5.3-codex", name: "Builder", thinking: "xhigh" })
+
+// Or map model/provider from .pi/agents/<profile>.md frontmatter
+pi_messenger({ action: "spawn", profile: "worker-xhigh", name: "Builder" })
 ```
 
 ### 3. Assign a Task
 ```typescript
-pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement Redis caching in src/cache.py" })
+pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement Redis caching in src/cache.py", workstream: "backtester" })
 ```
 
 ### 4. Communicate and Monitor
@@ -44,6 +48,12 @@ pi_messenger({ action: "agents.attach", name: "Builder" })
 pi_messenger({ action: "agents.memory.stats" })
 pi_messenger({ action: "agents.memory.reset" })
 ```
+
+Memory behavior is automatic when enabled:
+- On `agents.done`, summaries are embedded and stored in zvec.
+- On `agents.assign`, relevant prior summaries are recalled and injected into the assignment.
+
+Use `workstream` tags (e.g., `cvi-wing`, `backtester`) to isolate recall context within the same repo.
 
 ## Worker Completion Signal
 

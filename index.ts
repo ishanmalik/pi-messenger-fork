@@ -403,7 +403,7 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "spawn", profile: "worker-xhigh", name: "Builder" })
   pi_messenger({ action: "spawn", model: "openai-codex/gpt-5.3-codex", name: "Builder", thinking: "xhigh" })
   pi_messenger({ action: "agents.list" })
-  pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement X" })
+  pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement X", workstream: "feature-x" })
   pi_messenger({ action: "agents.check", name: "Builder" })
   pi_messenger({ action: "agents.logs", name: "Builder" })
   pi_messenger({ action: "agents.kill", name: "Builder" })
@@ -445,6 +445,7 @@ Usage (action-based API - preferred):
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
       profile: Type.Optional(Type.String({ description: "Spawn profile name from .pi/agents (maps model/provider only)" })),
+      workstream: Type.Optional(Type.String({ description: "Optional namespace/tag for memory isolation (e.g., cvi-wing, backtester)" })),
       thinking: Type.Optional(Type.String({ description: "Thinking level override (e.g., high, xhigh)" })),
       task: Type.Optional(Type.String({ description: "Task description for agents.assign" })),
       lines: Type.Optional(Type.Number({ description: "Number of lines for agents.logs (default 50)" })),
