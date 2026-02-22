@@ -72,7 +72,7 @@ import {
   reapOrphans,
   killAllSpawned,
 } from "./crew/orchestrator/registry.js";
-import { initMemory, closeMemory } from "./crew/orchestrator/memory.js";
+import { closeMemory } from "./crew/orchestrator/memory.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -810,22 +810,10 @@ Usage (action-based API - preferred):
       ctx.ui.notify(`Reaped ${reaped.length} orphaned agent(s): ${reaped.join(", ")}`, "info");
     }
 
-    const startupCrewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
-    if (startupCrewConfig.orchestrator.memory.enabled) {
-      try {
-        const memoryStore = await initMemory(cwd, startupCrewConfig.orchestrator.memory);
-        if (memoryStore.degraded && ctx.hasUI) {
-          ctx.ui.notify(`Memory store unavailable: ${memoryStore.reason ?? "unknown"}. Continuing without memory.`, "warning");
-        }
-      } catch (error) {
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Memory store failed to initialize: ${error instanceof Error ? error.message : "unknown"}. Memory disabled.`,
-            "warning",
-          );
-        }
-      }
-    }
+    // Intentionally skip orchestrator memory eager-init at session startup.
+    // Memory is initialized lazily when orchestrator actions actually use it.
+    // This avoids cross-extension noise (e.g. subagent sessions) and reduces
+    // RocksDB lock contention from unrelated parallel sessions.
 
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
