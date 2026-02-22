@@ -65,6 +65,7 @@ import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
+import { checkSpawnedAgentHealth, checkIdleAgents, isOrchestrator } from "./crew/orchestrator/registry.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -299,7 +300,27 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   function startStatusHeartbeat(): void {
     if (statusHeartbeatTimer) return;
     statusHeartbeatTimer = setInterval(() => {
-      if (latestCtx) updateStatus(latestCtx);
+      if (!latestCtx) return;
+
+      updateStatus(latestCtx);
+
+      if (!isOrchestrator()) return;
+
+      const cwd = latestCtx.cwd ?? process.cwd();
+      const reaped = checkSpawnedAgentHealth(cwd);
+      if (reaped.length > 0 && latestCtx.hasUI) {
+        for (const name of reaped) {
+          latestCtx.ui.notify(`⚠️ Spawned agent ${name} died unexpectedly`, "warning");
+        }
+      }
+
+      const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+      const idle = checkIdleAgents(crewConfig.orchestrator.idleTimeoutMs, cwd);
+      if (idle.length > 0 && latestCtx.hasUI) {
+        for (const item of idle) {
+          latestCtx.ui.notify(`⏰ ${item.name} idle for ${item.idleFor}. Kill? agents.kill({ name: "${item.name}" })`, "info");
+        }
+      }
     }, STATUS_HEARTBEAT_MS);
   }
 

@@ -2,9 +2,11 @@ import * as fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
+import { formatDuration } from "../../lib.js";
 import type { SpawnedAgent, SpawnedAgentStatus, HistoryEvent } from "./types.js";
 
 const spawnedByThisProcess = new Set<string>();
+const idleNotified = new Set<string>();
 
 const VALID_TRANSITIONS: Record<SpawnedAgentStatus, Set<SpawnedAgentStatus>> = {
   spawning: new Set(["joined", "dead"]),
@@ -137,6 +139,7 @@ function markDeadAndDelete(agent: SpawnedAgent, cwd: string, reason: string): vo
   }
 
   spawnedByThisProcess.delete(agent.name);
+  idleNotified.delete(agent.name);
   logHistory({
     event: "reap",
     agent: agent.name,
@@ -181,6 +184,7 @@ export function unregisterSpawned(name: string, cwd: string = process.cwd()): vo
     // ignore
   }
   spawnedByThisProcess.delete(name);
+  idleNotified.delete(name);
 }
 
 export function getSpawned(name: string, cwd: string = process.cwd()): SpawnedAgent | null {
@@ -222,6 +226,7 @@ export function transitionState(
   registerSpawned(updated, cwd);
   if (to === "dead") {
     spawnedByThisProcess.delete(name);
+    idleNotified.delete(name);
   }
   return true;
 }
@@ -258,6 +263,64 @@ export function reapOrphans(cwd: string = process.cwd()): string[] {
 
 export function checkSpawnedAgentHealth(cwd: string = process.cwd()): string[] {
   return reapOrphans(cwd);
+}
+
+function parseLastActivityMs(agent: SpawnedAgent): number {
+  const reg = findMeshRegistration(agent.name);
+  const activity = reg?.activity as Record<string, unknown> | undefined;
+  const iso = typeof activity?.lastActivityAt === "string" ? activity.lastActivityAt : null;
+  if (!iso) return agent.lastActivityAt;
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) return agent.lastActivityAt;
+  return parsed;
+}
+
+export function checkIdleAgents(
+  idleTimeoutMs: number,
+  cwd: string = process.cwd(),
+): Array<{ name: string; idleFor: string }> {
+  const warnings: Array<{ name: string; idleFor: string }> = [];
+  const now = Date.now();
+  const activeIdleNames = new Set<string>();
+
+  for (const agent of getAllSpawned(cwd)) {
+    if (agent.status !== "idle") {
+      idleNotified.delete(agent.name);
+      continue;
+    }
+
+    activeIdleNames.add(agent.name);
+
+    const lastActivityMs = parseLastActivityMs(agent);
+    if (lastActivityMs !== agent.lastActivityAt) {
+      registerSpawned({
+        ...agent,
+        lastActivityAt: lastActivityMs,
+      }, cwd);
+    }
+
+    const idleMs = Math.max(0, now - lastActivityMs);
+    if (idleMs <= idleTimeoutMs) {
+      idleNotified.delete(agent.name);
+      continue;
+    }
+
+    if (!idleNotified.has(agent.name)) {
+      idleNotified.add(agent.name);
+      warnings.push({
+        name: agent.name,
+        idleFor: formatDuration(idleMs),
+      });
+    }
+  }
+
+  for (const name of Array.from(idleNotified)) {
+    if (!activeIdleNames.has(name)) {
+      idleNotified.delete(name);
+    }
+  }
+
+  return warnings;
 }
 
 export function killAllSpawned(cwd: string = process.cwd()): void {

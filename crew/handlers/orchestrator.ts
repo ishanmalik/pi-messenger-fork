@@ -971,6 +971,161 @@ export async function executeAgentsDone(
   });
 }
 
+export async function executeAgentsCheck(
+  params: CrewParams,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const name = params.name;
+
+  if (!name) {
+    return result("Error: agents.check requires name.", {
+      mode: "agents.check",
+      error: "missing_name",
+    });
+  }
+
+  const agent = getSpawned(name, cwd);
+  if (!agent) {
+    return result(`Error: agent ${name} not found.`, {
+      mode: "agents.check",
+      error: "not_found",
+      name,
+    });
+  }
+
+  const alive = isPidAlive(agent.pid);
+  if (!alive && agent.status !== "dead") {
+    transitionState(name, "dead", cwd);
+    unregisterSpawned(name, cwd);
+  }
+
+  const mesh = readMeshRegistration(name, dirs);
+  const meshSession = mesh?.session as Record<string, unknown> | undefined;
+  const meshActivity = mesh?.activity as Record<string, unknown> | undefined;
+
+  const toolCalls = Number(meshSession?.toolCalls ?? 0) || 0;
+  const tokens = Number(meshSession?.tokens ?? 0) || 0;
+  const tokenText = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
+
+  const currentActivity = typeof meshActivity?.currentActivity === "string"
+    ? meshActivity.currentActivity
+    : "(no activity)";
+
+  const lastActivityIso = typeof meshActivity?.lastActivityAt === "string"
+    ? meshActivity.lastActivityAt
+    : null;
+  const lastActivityMs = lastActivityIso ? Date.parse(lastActivityIso) : NaN;
+  const activityAgo = Number.isFinite(lastActivityMs)
+    ? `${formatDuration(Math.max(0, Date.now() - lastActivityMs))} ago`
+    : "unknown";
+
+  const uptime = formatDuration(Math.max(0, Date.now() - agent.spawnedAt));
+  const lastChat = state.chatHistory.get(name)?.slice(-1)[0];
+  const files = Array.isArray(meshSession?.filesModified)
+    ? (meshSession?.filesModified as unknown[]).filter((v): v is string => typeof v === "string")
+    : [];
+
+  const lines: string[] = [];
+  lines.push(`# ${name}`);
+  lines.push(`Status: ${alive ? agent.status : "dead"}`);
+  lines.push(`Model: ${formatModelLabel(agent)}`);
+  lines.push(`Task: ${agent.assignedTask ?? "(none)"}`);
+  lines.push(`Uptime: ${uptime}`);
+  lines.push(`Activity: ${currentActivity} (${activityAgo})`);
+  lines.push(`Tools: ${toolCalls} calls, ${tokenText} tokens`);
+  lines.push(`Last message: ${lastChat ? lastChat.text : "(none)"}`);
+  lines.push(`Files modified: ${files.length > 0 ? files.join(", ") : "(none)"}`);
+  lines.push(`Backend: ${agent.backend}${agent.tmuxPaneId ? ` (${agent.tmuxPaneId})` : ""}`);
+
+  return result(lines.join("\n"), {
+    mode: "agents.check",
+    name,
+    status: alive ? agent.status : "dead",
+    model: formatModelLabel(agent),
+    assignedTask: agent.assignedTask,
+    uptime,
+    activity: {
+      current: currentActivity,
+      lastActivityAt: lastActivityIso,
+      ago: activityAgo,
+    },
+    usage: {
+      toolCalls,
+      tokens,
+    },
+    files,
+    lastMessage: lastChat ?? null,
+    backend: agent.backend,
+    tmuxPane: agent.tmuxPaneId,
+  });
+}
+
+export async function executeAgentsAttach(
+  params: CrewParams,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const name = params.name;
+
+  if (!name) {
+    return result("Error: agents.attach requires name.", {
+      mode: "agents.attach",
+      error: "missing_name",
+    });
+  }
+
+  const agent = getSpawned(name, cwd);
+  if (!agent) {
+    return result(`Error: agent ${name} not found.`, {
+      mode: "agents.attach",
+      error: "not_found",
+      name,
+    });
+  }
+
+  if (agent.backend === "headless") {
+    return result("Agent is running in headless mode. Use agents.logs instead.", {
+      mode: "agents.attach",
+      name,
+      backend: "headless",
+    });
+  }
+
+  if (!agent.tmuxWindowId) {
+    return result(`Error: ${name} has no tmux window id.`, {
+      mode: "agents.attach",
+      error: "missing_window_id",
+      name,
+    });
+  }
+
+  const command = `tmux select-window -t ${agent.tmuxWindowId}`;
+
+  if (process.env.TMUX) {
+    try {
+      execFileSync("tmux", ["select-window", "-t", agent.tmuxWindowId], { stdio: "ignore" });
+      return result(`Attached to ${name} in tmux window ${agent.tmuxWindowId}.`, {
+        mode: "agents.attach",
+        name,
+        attached: true,
+        command,
+      });
+    } catch {
+      // fall through to command output
+    }
+  }
+
+  return result(`To attach: ${command}`, {
+    mode: "agents.attach",
+    name,
+    attached: false,
+    command,
+  });
+}
+
 export async function execute(
   op: string,
   params: CrewParams,
@@ -991,11 +1146,17 @@ export async function execute(
     case "assign":
       return executeAgentsAssign(params, state, dirs, ctx);
 
+    case "check":
+      return executeAgentsCheck(params, state, dirs, ctx);
+
     case "done":
       return executeAgentsDone(params, state, dirs, ctx);
 
     case "logs":
       return executeAgentsLogs(params, ctx);
+
+    case "attach":
+      return executeAgentsAttach(params, ctx);
 
     case "memory.stats": {
       const cwd = ctx.cwd ?? process.cwd();
