@@ -65,7 +65,14 @@ import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
-import { checkSpawnedAgentHealth, checkIdleAgents, isOrchestrator } from "./crew/orchestrator/registry.js";
+import {
+  checkSpawnedAgentHealth,
+  checkIdleAgents,
+  isOrchestrator,
+  reapOrphans,
+  killAllSpawned,
+} from "./crew/orchestrator/registry.js";
+import { initMemory, closeMemory } from "./crew/orchestrator/memory.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -789,9 +796,32 @@ Usage (action-based API - preferred):
         restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
       }
     }
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    const cwd = ctx.cwd ?? process.cwd();
+    const { staleCleared } = restorePlanningState(cwd);
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
+
+    const reaped = reapOrphans(cwd);
+    if (reaped.length > 0 && ctx.hasUI) {
+      ctx.ui.notify(`Reaped ${reaped.length} orphaned agent(s): ${reaped.join(", ")}`, "info");
+    }
+
+    const startupCrewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+    if (startupCrewConfig.orchestrator.memory.enabled) {
+      try {
+        const memoryStore = await initMemory(cwd, startupCrewConfig.orchestrator.memory);
+        if (memoryStore.degraded && ctx.hasUI) {
+          ctx.ui.notify(`Memory store unavailable: ${memoryStore.reason ?? "unknown"}. Continuing without memory.`, "warning");
+        }
+      } catch (error) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Memory store failed to initialize: ${error instanceof Error ? error.message : "unknown"}. Memory disabled.",
+            "warning",
+          );
+        }
+      }
     }
 
     state.isHuman = ctx.hasUI;
@@ -1039,7 +1069,12 @@ Usage (action-based API - preferred):
   });
 
   pi.on("session_shutdown", async () => {
-    shutdownLobbyWorkers(process.cwd());
+    const cwd = process.cwd();
+
+    killAllSpawned(cwd);
+    closeMemory();
+
+    shutdownLobbyWorkers(cwd);
     shutdownAllWorkers();
     stopStatusHeartbeat();
     overlayOpening = false;
