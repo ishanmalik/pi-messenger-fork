@@ -1,0 +1,799 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import * as path from "node:path";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { MessengerState, Dirs } from "../../lib.js";
+import { generateMemorableName, formatDuration } from "../../lib.js";
+import * as messengerStore from "../../store.js";
+import { logFeedEvent } from "../../feed.js";
+import type { CrewParams } from "../types.js";
+import { result } from "../utils/result.js";
+import { loadCrewConfig } from "../utils/config.js";
+import * as crewStore from "../store.js";
+import {
+  registerSpawned,
+  unregisterSpawned,
+  getSpawned,
+  getAllSpawned,
+  transitionState,
+  reapOrphans,
+  logHistory,
+} from "../orchestrator/registry.js";
+import type { SpawnedAgent } from "../orchestrator/types.js";
+import { getActiveMemoryStore, initMemory, recall, remember, resetMemory, getMemoryStats } from "../orchestrator/memory.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const EXTENSION_DIR = path.resolve(__dirname, "../..");
+
+const HEADLESS_LOG_LIMIT = 2000;
+
+interface HeadlessRuntime {
+  proc: ChildProcess;
+  logs: string[];
+}
+
+const headlessRuntimes = new Map<string, HeadlessRuntime>();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readJson<T>(filePath: string): T | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function readMeshRegistration(name: string, dirs: Dirs): Record<string, unknown> | null {
+  return readJson<Record<string, unknown>>(path.join(dirs.registry, `${name}.json`));
+}
+
+function parseLastActivityMs(reg: Record<string, unknown> | null): number {
+  if (!reg) return Date.now();
+  const activity = reg.activity as Record<string, unknown> | undefined;
+  const iso = typeof activity?.lastActivityAt === "string"
+    ? activity.lastActivityAt
+    : undefined;
+  const parsed = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
+
+function appendHeadlessLogs(name: string, chunk: string): void {
+  const runtime = headlessRuntimes.get(name);
+  if (!runtime) return;
+
+  for (const line of chunk.replace(/\r/g, "").split("\n")) {
+    if (!line) continue;
+    runtime.logs.push(line);
+  }
+
+  if (runtime.logs.length > HEADLESS_LOG_LIMIT) {
+    runtime.logs.splice(0, runtime.logs.length - HEADLESS_LOG_LIMIT);
+  }
+}
+
+function hasNameCollision(name: string, dirs: Dirs, cwd: string): boolean {
+  const local = getSpawned(name, cwd);
+  if (local && local.status !== "dead") return true;
+
+  const meshReg = readMeshRegistration(name, dirs);
+  if (!meshReg) return false;
+
+  const pid = typeof meshReg.pid === "number" ? meshReg.pid : Number(meshReg.pid);
+  if (!Number.isFinite(pid)) return false;
+  return isPidAlive(pid);
+}
+
+function resolveSpawnName(requested: string | undefined, dirs: Dirs, cwd: string): string | null {
+  if (requested && !hasNameCollision(requested, dirs, cwd)) {
+    return requested;
+  }
+
+  for (let i = 0; i < 5; i++) {
+    const generated = generateMemorableName();
+    if (!hasNameCollision(generated, dirs, cwd)) {
+      return generated;
+    }
+  }
+
+  return null;
+}
+
+function clearInbox(dirs: Dirs, name: string): void {
+  const inbox = path.join(dirs.inbox, name);
+  try { fs.rmSync(inbox, { recursive: true, force: true }); } catch {}
+  try { fs.mkdirSync(inbox, { recursive: true }); } catch {}
+}
+
+function shellEscape(input: string): string {
+  return `'${input.replace(/'/g, `'\\''`)}'`;
+}
+
+function buildInitialPrompt(
+  name: string,
+  model: string,
+  orchestratorName: string,
+  userPrompt?: string,
+): string {
+  const custom = userPrompt?.trim() ?? "";
+  return `Your FIRST action must be to join the messenger mesh. Call this immediately:
+
+pi_messenger({ action: "join" })
+
+You are "${name}", a ${model} agent spawned by ${orchestratorName} to work on this project.
+
+## Your Role
+- Wait for task assignments via DM from ${orchestratorName}
+- When you receive a task, implement it fully using the tools available to you
+- When done, call: pi_messenger({ action: "agents.done", summary: "Brief description of what you did" })
+- You may message ${orchestratorName} at any time for clarification: pi_messenger({ action: "send", to: "${orchestratorName}", message: "..." })
+- Reserve files before editing: pi_messenger({ action: "reserve", paths: ["..."] })
+- Release files when done: pi_messenger({ action: "release" })
+
+${custom}`.trim();
+}
+
+function tmuxAvailable(): boolean {
+  try {
+    execFileSync("tmux", ["display-message", "-p", "#{session_name}"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeKill(pid: number, signal: NodeJS.Signals): void {
+  if (!Number.isFinite(pid) || pid <= 0) return;
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // ignore
+  }
+}
+
+function cleanupTmuxPane(agent: SpawnedAgent): void {
+  if (!agent.tmuxPaneId) return;
+  try {
+    execFileSync("tmux", ["kill-pane", "-t", agent.tmuxPaneId], { stdio: "ignore" });
+  } catch {
+    // ignore
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  while (Date.now() < deadline) {
+    if (!isPidAlive(pid)) return true;
+    await sleep(Math.min(2000, Math.max(50, deadline - Date.now())));
+  }
+  return !isPidAlive(pid);
+}
+
+async function waitForMeshJoin(
+  name: string,
+  dirs: Dirs,
+  timeoutMs: number,
+  expectedPid?: number,
+): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+
+  while (Date.now() < deadline) {
+    const reg = readMeshRegistration(name, dirs);
+    if (reg) {
+      const pid = typeof reg.pid === "number" ? reg.pid : Number(reg.pid);
+      const pidOk = Number.isFinite(pid) && isPidAlive(pid);
+      const expectedOk = !expectedPid || pid === expectedPid;
+      if (pidOk && expectedOk) {
+        return reg;
+      }
+    }
+    await sleep(2000);
+  }
+
+  return null;
+}
+
+function formatModelLabel(agent: SpawnedAgent): string {
+  return agent.thinking ? `${agent.model}:${agent.thinking}` : agent.model;
+}
+
+function resolveThinking(params: CrewParams, defaultThinking: string): string {
+  const p = params as Record<string, unknown>;
+  if (typeof p.thinking === "string" && p.thinking.trim().length > 0) {
+    return p.thinking.trim();
+  }
+  return defaultThinking;
+}
+
+function resolveLines(params: CrewParams, fallback = 50): number {
+  const p = params as Record<string, unknown>;
+  const lines = typeof p.lines === "number" ? p.lines : fallback;
+  if (!Number.isFinite(lines)) return fallback;
+  return Math.max(1, Math.min(500, Math.floor(lines)));
+}
+
+async function ensureMemory(cwd: string): Promise<ReturnType<typeof getActiveMemoryStore>> {
+  const existing = getActiveMemoryStore();
+  if (existing && existing.projectDir === cwd) {
+    return existing;
+  }
+
+  const config = loadCrewConfig(crewStore.getCrewDir(cwd));
+  return initMemory(cwd, config.orchestrator.memory);
+}
+
+async function maybeBootstrapMemory(
+  cwd: string,
+  state: MessengerState,
+  dirs: Dirs,
+  targetName: string,
+  userPrompt: string | undefined,
+  topk: number,
+): Promise<number> {
+  const query = userPrompt?.trim() ?? "";
+  if (!query) return 0;
+
+  const store = await ensureMemory(cwd);
+  if (!store || !store.enabled || store.degraded) return 0;
+
+  const recalled = await recall(store, query, { topk });
+  if (recalled.results.length === 0) return 0;
+
+  const lines = recalled.results.map((entry) => {
+    const age = formatDuration(Date.now() - entry.createdAtMs);
+    return `- [${entry.agent}, ${age} ago]: ${entry.text}`;
+  });
+
+  const message = `## Context from prior work\n${lines.join("\n")}`;
+  messengerStore.sendMessageToAgent(state, dirs, targetName, message);
+  return recalled.results.length;
+}
+
+export async function executeSpawn(
+  params: CrewParams,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const config = loadCrewConfig(crewStore.getCrewDir(cwd));
+
+  const active = getAllSpawned(cwd).filter(agent => agent.status !== "dead");
+  if (active.length >= config.orchestrator.maxSpawnedAgents) {
+    return result(
+      `Error: max spawned agents reached (${active.length}/${config.orchestrator.maxSpawnedAgents}).`,
+      { mode: "spawn", error: "limit_reached", maxSpawnedAgents: config.orchestrator.maxSpawnedAgents },
+    );
+  }
+
+  const model = params.model?.trim() || config.orchestrator.defaultModel;
+  const thinking = resolveThinking(params, config.orchestrator.defaultThinking);
+  const name = resolveSpawnName(params.name, dirs, cwd);
+
+  if (!name) {
+    return result(
+      "Error: failed to generate a unique agent name after 5 attempts.",
+      { mode: "spawn", error: "name_collision" },
+    );
+  }
+
+  clearInbox(dirs, name);
+
+  const orchestratorName = state.agentName || "orchestrator";
+  const initialPrompt = buildInitialPrompt(name, model, orchestratorName, params.prompt);
+
+  const backend = tmuxAvailable() ? "tmux" as const : "headless" as const;
+  let pid = 0;
+  let tmuxPaneId: string | null = null;
+  let tmuxWindowId: string | null = null;
+
+  if (backend === "tmux") {
+    try {
+      const command = [
+        `PI_AGENT_NAME=${shellEscape(name)}`,
+        "pi",
+        "--model",
+        shellEscape(model),
+        "--thinking",
+        shellEscape(thinking),
+        "--extension",
+        shellEscape(EXTENSION_DIR),
+        shellEscape(initialPrompt),
+      ].join(" ");
+
+      const output = String(execFileSync(
+        "tmux",
+        ["new-window", "-P", "-F", "#{pane_id} #{window_id} #{pane_pid}", "-n", name, command],
+        { encoding: "utf-8" },
+      )).trim();
+
+      const [pane, win, panePidRaw] = output.split(/\s+/);
+      tmuxPaneId = pane || null;
+      tmuxWindowId = win || null;
+      pid = Number(panePidRaw) || 0;
+    } catch (error) {
+      return result(
+        `Error: failed to spawn tmux worker: ${error instanceof Error ? error.message : "unknown"}`,
+        { mode: "spawn", error: "tmux_spawn_failed" },
+      );
+    }
+  } else {
+    const args = [
+      "--model", model,
+      "--thinking", thinking,
+      "--extension", EXTENSION_DIR,
+      "--no-session",
+      initialPrompt,
+    ];
+
+    const proc = spawn("pi", args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, PI_AGENT_NAME: name },
+    });
+
+    pid = proc.pid ?? 0;
+
+    const runtime: HeadlessRuntime = {
+      proc,
+      logs: [],
+    };
+    headlessRuntimes.set(name, runtime);
+
+    proc.stdout?.on("data", (chunk) => appendHeadlessLogs(name, String(chunk)));
+    proc.stderr?.on("data", (chunk) => appendHeadlessLogs(name, String(chunk)));
+    proc.on("close", () => {
+      headlessRuntimes.delete(name);
+      const current = getSpawned(name, cwd);
+      if (current && current.status !== "dead") {
+        transitionState(name, "dead", cwd);
+        unregisterSpawned(name, cwd);
+        logHistory({
+          event: "reap",
+          agent: name,
+          timestamp: new Date().toISOString(),
+          details: { reason: "headless_exit" },
+        }, cwd);
+      }
+    });
+  }
+
+  const now = Date.now();
+  registerSpawned({
+    name,
+    pid,
+    sessionId: "",
+    tmuxPaneId,
+    tmuxWindowId,
+    model,
+    thinking,
+    status: "spawning",
+    spawnedAt: now,
+    spawnedBy: orchestratorName,
+    assignedTask: null,
+    lastActivityAt: now,
+    backend,
+  }, cwd);
+
+  const joined = await waitForMeshJoin(name, dirs, config.orchestrator.spawnTimeoutMs, pid || undefined);
+  if (!joined) {
+    safeKill(pid, "SIGTERM");
+    await waitForProcessExit(pid, 2000);
+    safeKill(pid, "SIGKILL");
+
+    const existing = getSpawned(name, cwd);
+    if (existing) {
+      transitionState(name, "dead", cwd);
+      unregisterSpawned(name, cwd);
+    }
+
+    return result(
+      `Error: ${name} did not join the mesh within ${Math.floor(config.orchestrator.spawnTimeoutMs / 1000)}s.`,
+      { mode: "spawn", error: "spawn_timeout", name },
+    );
+  }
+
+  const current = getSpawned(name, cwd);
+  if (current) {
+    registerSpawned({
+      ...current,
+      sessionId: typeof joined.sessionId === "string" ? joined.sessionId : "",
+      status: "joined",
+      lastActivityAt: parseLastActivityMs(joined),
+    }, cwd);
+    transitionState(name, "idle", cwd);
+  }
+
+  let memoryInjected = 0;
+  if (config.orchestrator.memory.enabled) {
+    try {
+      memoryInjected = await maybeBootstrapMemory(
+        cwd,
+        state,
+        dirs,
+        name,
+        params.prompt,
+        config.orchestrator.memory.autoInjectTopK,
+      );
+    } catch {
+      memoryInjected = 0;
+    }
+  }
+
+  logHistory({
+    event: "spawn",
+    agent: name,
+    timestamp: new Date().toISOString(),
+    details: { backend, model, thinking, pid, tmuxPaneId, tmuxWindowId, memoryInjected },
+  }, cwd);
+  logFeedEvent(cwd, state.agentName, "message", name, `spawned ${name} (${backend})`);
+
+  const modelLabel = thinking ? `${model}:${thinking}` : model;
+
+  return result(
+    `Spawned ${name} (${modelLabel}) via ${backend}. Status: idle.`,
+    {
+      mode: "spawn",
+      name,
+      model,
+      thinking,
+      backend,
+      tmuxPane: tmuxPaneId,
+      tmuxWindow: tmuxWindowId,
+      status: "idle",
+      memoryInjected,
+    },
+  );
+}
+
+function formatAgentStatusLine(agent: SpawnedAgent, mesh: Record<string, unknown> | null): string {
+  const icon: Record<SpawnedAgent["status"], string> = {
+    spawning: "🟡",
+    joined: "🟢",
+    idle: "🟢",
+    assigned: "🟢",
+    done: "⚪",
+    dead: "💀",
+  };
+
+  const session = mesh?.session as Record<string, unknown> | undefined;
+  const tools = Number(session?.toolCalls ?? 0) || 0;
+  const tokens = Number(session?.tokens ?? 0) || 0;
+  const tokenText = tokens >= 1000 ? `${(tokens / 1000).toFixed(1)}k` : `${tokens}`;
+  const taskText = agent.assignedTask ? `assigned: "${agent.assignedTask}"` : agent.status;
+  const tmuxText = agent.backend === "tmux"
+    ? `tmux:${agent.tmuxPaneId ?? "?"}`
+    : "headless";
+
+  return `${icon[agent.status]} ${agent.name} (${formatModelLabel(agent)}) — ${taskText} — ${tools} tools, ${tokenText} tokens — ${tmuxText}`;
+}
+
+export async function executeAgentsList(
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const reaped = reapOrphans(cwd);
+  const agents = getAllSpawned(cwd);
+
+  if (agents.length === 0 && reaped.length === 0) {
+    return result("# Orchestrator Agents\n\nNo spawned orchestrator agents.", {
+      mode: "agents.list",
+      agents: [],
+      reaped,
+      count: 0,
+    });
+  }
+
+  const lines: string[] = [];
+  lines.push(`# Orchestrator Agents (${agents.length} spawned)`);
+  lines.push("");
+
+  const details = agents.map(agent => {
+    const mesh = readMeshRegistration(agent.name, dirs);
+    lines.push(formatAgentStatusLine(agent, mesh));
+    return {
+      ...agent,
+      mesh,
+    };
+  });
+
+  for (const name of reaped) {
+    lines.push(`💀 ${name} — dead (reaped: process exited or mesh entry missing)`);
+  }
+
+  return result(lines.join("\n"), {
+    mode: "agents.list",
+    agents: details,
+    reaped,
+    count: agents.length,
+  });
+}
+
+async function captureKillSummaryIfNeeded(
+  cwd: string,
+  agent: SpawnedAgent,
+): Promise<void> {
+  const config = loadCrewConfig(crewStore.getCrewDir(cwd));
+  if (!config.orchestrator.memory.enabled || !agent.assignedTask) return;
+
+  const store = await ensureMemory(cwd);
+  if (!store || !store.enabled || store.degraded) return;
+
+  const summary = `Agent ${agent.name} was killed while assigned: ${agent.assignedTask}. Last known status: ${agent.status}.`;
+  await remember(store, summary, {
+    agent: agent.name,
+    type: "summary",
+    source: "agents.kill",
+    taskId: agent.assignedTask,
+  });
+}
+
+async function killOne(
+  name: string,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+  opts?: { skipSummary?: boolean },
+): Promise<{ ok: boolean; noOp?: boolean; error?: string }> {
+  const cwd = ctx.cwd ?? process.cwd();
+  const config = loadCrewConfig(crewStore.getCrewDir(cwd));
+  const agent = getSpawned(name, cwd);
+
+  if (!agent) {
+    return { ok: false, error: "not_found" };
+  }
+
+  if (agent.status === "dead" || agent.status === "done") {
+    return { ok: true, noOp: true };
+  }
+
+  if (!opts?.skipSummary) {
+    await captureKillSummaryIfNeeded(cwd, agent);
+  }
+
+  transitionState(name, "done", cwd);
+
+  try {
+    messengerStore.sendMessageToAgent(
+      state,
+      dirs,
+      name,
+      "SHUTDOWN: Release reservations and exit.",
+    );
+  } catch {
+    // best effort
+  }
+
+  let exited = await waitForProcessExit(agent.pid, config.orchestrator.gracePeriodMs);
+  if (!exited) {
+    safeKill(agent.pid, "SIGTERM");
+    exited = await waitForProcessExit(agent.pid, 5000);
+  }
+  if (!exited) {
+    safeKill(agent.pid, "SIGKILL");
+  }
+
+  cleanupTmuxPane(agent);
+
+  transitionState(name, "dead", cwd);
+  unregisterSpawned(name, cwd);
+  headlessRuntimes.delete(name);
+
+  try {
+    fs.unlinkSync(path.join(dirs.registry, `${name}.json`));
+  } catch {
+    // ignore
+  }
+
+  logHistory({
+    event: "kill",
+    agent: name,
+    timestamp: new Date().toISOString(),
+    details: { pid: agent.pid, backend: agent.backend },
+  }, cwd);
+  logFeedEvent(cwd, state.agentName, "message", name, `killed ${name}`);
+
+  return { ok: true };
+}
+
+export async function executeAgentsKill(
+  params: CrewParams,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  if (!params.name) {
+    return result("Error: agents.kill requires name.", {
+      mode: "agents.kill",
+      error: "missing_name",
+    });
+  }
+
+  const outcome = await killOne(params.name, state, dirs, ctx);
+  if (!outcome.ok) {
+    return result(`Error: failed to kill ${params.name} (${outcome.error ?? "unknown"}).`, {
+      mode: "agents.kill",
+      error: outcome.error ?? "kill_failed",
+      name: params.name,
+    });
+  }
+
+  if (outcome.noOp) {
+    return result(`${params.name} is already done/dead (no-op).`, {
+      mode: "agents.kill",
+      name: params.name,
+      killed: false,
+      noop: true,
+    });
+  }
+
+  return result(`Killed ${params.name}.`, {
+    mode: "agents.kill",
+    name: params.name,
+    killed: true,
+  });
+}
+
+export async function executeAgentsKillall(
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const active = getAllSpawned(cwd).filter(agent => agent.status !== "dead");
+
+  const killed: string[] = [];
+  const failed: string[] = [];
+
+  for (const agent of active) {
+    const outcome = await killOne(agent.name, state, dirs, ctx);
+    if (outcome.ok) {
+      if (!outcome.noOp) killed.push(agent.name);
+    } else {
+      failed.push(agent.name);
+    }
+  }
+
+  return result(
+    `Kill-all complete. Killed: ${killed.length}. Failed: ${failed.length}.`,
+    {
+      mode: "agents.killall",
+      killed,
+      failed,
+    },
+  );
+}
+
+export async function executeAgentsLogs(
+  params: CrewParams,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const lines = resolveLines(params, 50);
+  const name = params.name;
+
+  if (!name) {
+    return result("Error: agents.logs requires name.", {
+      mode: "agents.logs",
+      error: "missing_name",
+    });
+  }
+
+  const agent = getSpawned(name, cwd);
+  if (!agent) {
+    return result(`Error: agent ${name} not found.`, {
+      mode: "agents.logs",
+      error: "not_found",
+      name,
+    });
+  }
+
+  if (agent.backend === "tmux") {
+    if (!agent.tmuxPaneId) {
+      return result(`Error: ${name} has no tmux pane id.`, {
+        mode: "agents.logs",
+        error: "missing_tmux_pane",
+      });
+    }
+
+    try {
+      const output = String(execFileSync(
+        "tmux",
+        ["capture-pane", "-t", agent.tmuxPaneId, "-p", "-S", `-${lines}`],
+        { encoding: "utf-8" },
+      ));
+
+      return result(output.trim() || `(No tmux output for ${name})`, {
+        mode: "agents.logs",
+        name,
+        backend: "tmux",
+        lines,
+      });
+    } catch (error) {
+      return result(
+        `Error capturing tmux logs for ${name}: ${error instanceof Error ? error.message : "unknown"}`,
+        { mode: "agents.logs", error: "tmux_capture_failed", name },
+      );
+    }
+  }
+
+  const runtime = headlessRuntimes.get(name);
+  const output = runtime
+    ? runtime.logs.slice(-lines).join("\n")
+    : "(No headless logs captured for this process in current session)";
+
+  return result(output, {
+    mode: "agents.logs",
+    name,
+    backend: "headless",
+    lines,
+  });
+}
+
+export async function execute(
+  op: string,
+  params: CrewParams,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  switch (op) {
+    case "list":
+      return executeAgentsList(state, dirs, ctx);
+
+    case "kill":
+      return executeAgentsKill(params, state, dirs, ctx);
+
+    case "killall":
+      return executeAgentsKillall(state, dirs, ctx);
+
+    case "logs":
+      return executeAgentsLogs(params, ctx);
+
+    case "memory.stats": {
+      const cwd = ctx.cwd ?? process.cwd();
+      const store = await ensureMemory(cwd);
+      if (!store) {
+        return result("Memory store unavailable.", { mode: "agents.memory.stats", available: false });
+      }
+      const stats = getMemoryStats(store);
+      return result(JSON.stringify(stats, null, 2), {
+        mode: "agents.memory.stats",
+        stats,
+      });
+    }
+
+    case "memory.reset": {
+      const cwd = ctx.cwd ?? process.cwd();
+      resetMemory(cwd);
+      return result("Orchestrator memory reset.", {
+        mode: "agents.memory.reset",
+        reset: true,
+      });
+    }
+
+    default:
+      return result(`agents.${op} is not implemented yet.`, {
+        mode: `agents.${op}`,
+        error: "not_implemented",
+      });
+  }
+}
