@@ -80,6 +80,9 @@ export interface CrewConfig {
     gracePeriodMs: number;
     maxSpawnedAgents: number;
     spawnTimeoutMs: number;
+    spawnTimeoutMaxMs: number;
+    spawnTimeoutSlowModelMultiplier: number;
+    spawnTimeoutHighThinkingMultiplier: number;
     messageBudget: number;
     memory: {
       enabled: boolean;
@@ -129,11 +132,14 @@ const DEFAULT_CONFIG: CrewConfig = {
     gracePeriodMs: 15000,
     maxSpawnedAgents: 5,
     spawnTimeoutMs: 30000,
+    spawnTimeoutMaxMs: 180000,
+    spawnTimeoutSlowModelMultiplier: 1.75,
+    spawnTimeoutHighThinkingMultiplier: 1.5,
     messageBudget: 100,
     memory: {
       enabled: true,
-      embeddingModel: "text-embedding-3-small",
-      embeddingProvider: "openai",
+      embeddingModel: "gemini-embedding-001",
+      embeddingProvider: "google",
       dimensions: 1536,
       maxEntries: 10000,
       autoInjectTopK: 3,

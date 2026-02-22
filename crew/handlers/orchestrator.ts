@@ -1,6 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -11,6 +10,7 @@ import { logFeedEvent } from "../../feed.js";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { loadCrewConfig } from "../utils/config.js";
+import { pushModelArgs, modelHasThinkingSuffix } from "../agents.js";
 import * as crewStore from "../store.js";
 import {
   registerSpawned,
@@ -29,10 +29,52 @@ const __dirname = path.dirname(__filename);
 const EXTENSION_DIR = path.resolve(__dirname, "../..");
 
 const HEADLESS_LOG_LIMIT = 2000;
+const SPAWN_DIAGNOSTIC_LOG_LINES = 250;
+const SPAWN_DIAGNOSTIC_TMUX_LINES = 250;
+const SPAWN_TIMEOUT_OVERRIDE_KEYS = ["spawnTimeoutMs", "timeoutMs"] as const;
+const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const SLOW_MODEL_HINTS = [
+  "opus",
+  "gpt-5",
+  "o1",
+  "o3",
+  "ultra",
+  "sonnet-4-6",
+  "gemini-2.5-pro",
+  "gemini-3-pro",
+];
 
 interface HeadlessRuntime {
   proc: ChildProcess;
   logs: string[];
+}
+
+interface SpawnTimeoutDiagnostics {
+  name: string;
+  model: string;
+  thinking: string;
+  backend: "tmux" | "headless";
+  timeoutMs: number;
+  expectedPid: number;
+  meshPid: number | null;
+  meshPidRelation: "none" | "exact" | "descendant" | "mismatch";
+  expectedPidAliveBeforeKill: boolean;
+  expectedPidAliveAfterKill: boolean;
+  meshPidAliveAtTimeout: boolean;
+  pidSnapshotExpected: string | null;
+  pidSnapshotMesh: string | null;
+  meshRegistration: Record<string, unknown> | null;
+  tmuxPaneId: string | null;
+  tmuxWindowId: string | null;
+  tmuxPaneTail: string | null;
+  headlessTail: string[];
+  signals: {
+    sentSigterm: boolean;
+    exitedAfterSigterm: boolean;
+    sentSigkill: boolean;
+  };
+  notes: string[];
+  createdAt: string;
 }
 
 const headlessRuntimes = new Map<string, HeadlessRuntime>();
@@ -49,6 +91,126 @@ function isPidAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+function ensureDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function writeJsonAtomic(filePath: string, data: unknown): void {
+  ensureDir(path.dirname(filePath));
+  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+  fs.renameSync(tempPath, filePath);
+}
+
+function parsePid(raw: unknown): number | null {
+  const pid = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  return Math.floor(pid);
+}
+
+function readParentPid(pid: number): number | null {
+  try {
+    const output = String(execFileSync(
+      "ps",
+      ["-o", "ppid=", "-p", String(pid)],
+      { encoding: "utf-8" },
+    )).trim();
+    const parsed = Number(output);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDescendantPid(pid: number, ancestorPid: number): boolean {
+  if (!Number.isFinite(pid) || !Number.isFinite(ancestorPid)) return false;
+  if (pid <= 0 || ancestorPid <= 0) return false;
+  if (pid === ancestorPid) return true;
+
+  let current = pid;
+  for (let depth = 0; depth < 32; depth++) {
+    const parent = readParentPid(current);
+    if (!parent || parent <= 1) return false;
+    if (parent === ancestorPid) return true;
+    if (parent === current) return false;
+    current = parent;
+  }
+
+  return false;
+}
+
+function resolvePidRelation(meshPid: number | null, expectedPid: number): "none" | "exact" | "descendant" | "mismatch" {
+  if (!meshPid) return "none";
+  if (!expectedPid) return "none";
+  if (meshPid === expectedPid) return "exact";
+  return isDescendantPid(meshPid, expectedPid) ? "descendant" : "mismatch";
+}
+
+function diagnosticsDir(cwd: string): string {
+  return path.join(cwd, ".pi", "messenger", "orchestrator", "spawn-diagnostics");
+}
+
+function extractThinkingSuffix(model: string | undefined): string | null {
+  if (!model) return null;
+  const idx = model.lastIndexOf(":");
+  if (idx === -1) return null;
+  const suffix = model.slice(idx + 1).trim().toLowerCase();
+  return THINKING_LEVELS.has(suffix) ? suffix : null;
+}
+
+function resolveSpawnTimeoutOverride(params: CrewParams): number | null {
+  const payload = params as Record<string, unknown>;
+  for (const key of SPAWN_TIMEOUT_OVERRIDE_KEYS) {
+    const value = payload[key];
+    const parsed = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(parsed)) continue;
+    if (parsed <= 0) continue;
+    return Math.floor(parsed);
+  }
+  return null;
+}
+
+function modelLooksSlow(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return SLOW_MODEL_HINTS.some(hint => normalized.includes(hint));
+}
+
+function resolveSpawnTimeoutMs(
+  params: CrewParams,
+  config: ReturnType<typeof loadCrewConfig>,
+  model: string,
+  thinking: string,
+): number {
+  const baseMs = Math.max(1000, Math.floor(config.orchestrator.spawnTimeoutMs));
+  const maxMs = Math.max(baseMs, Math.floor(config.orchestrator.spawnTimeoutMaxMs || baseMs));
+
+  const overrideMs = resolveSpawnTimeoutOverride(params);
+  if (overrideMs && Number.isFinite(overrideMs)) {
+    return Math.max(1000, Math.min(Math.floor(overrideMs), maxMs));
+  }
+
+  let timeoutMs = baseMs;
+
+  if (modelLooksSlow(model)) {
+    const factor = Number.isFinite(config.orchestrator.spawnTimeoutSlowModelMultiplier)
+      ? Math.max(1, config.orchestrator.spawnTimeoutSlowModelMultiplier)
+      : 1.75;
+    timeoutMs = Math.round(timeoutMs * factor);
+  }
+
+  const effectiveThinking = extractThinkingSuffix(model) ?? thinking.toLowerCase();
+  if (effectiveThinking === "high" || effectiveThinking === "xhigh") {
+    const factor = Number.isFinite(config.orchestrator.spawnTimeoutHighThinkingMultiplier)
+      ? Math.max(1, config.orchestrator.spawnTimeoutHighThinkingMultiplier)
+      : 1.5;
+    timeoutMs = Math.round(timeoutMs * factor);
+  }
+
+  return Math.max(baseMs, Math.min(timeoutMs, maxMs));
 }
 
 function readJson<T>(filePath: string): T | null {
@@ -246,6 +408,57 @@ function cleanupTmuxPane(agent: SpawnedAgent): void {
   }
 }
 
+function captureTmuxPaneTail(paneId: string | null, lines = SPAWN_DIAGNOSTIC_TMUX_LINES): string | null {
+  if (!paneId) return null;
+  try {
+    const output = String(execFileSync(
+      "tmux",
+      ["capture-pane", "-t", paneId, "-p", "-S", `-${Math.max(1, lines)}`],
+      { encoding: "utf-8" },
+    )).trim();
+    return output.length > 0 ? output : null;
+  } catch {
+    return null;
+  }
+}
+
+function captureHeadlessTail(name: string, lines = SPAWN_DIAGNOSTIC_LOG_LINES): string[] {
+  const runtime = headlessRuntimes.get(name);
+  if (!runtime) return [];
+  return runtime.logs.slice(-Math.max(1, lines));
+}
+
+function capturePidSnapshot(pid: number): string | null {
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  try {
+    const output = String(execFileSync(
+      "ps",
+      ["-o", "pid=,ppid=,stat=,etime=,command=", "-p", String(pid)],
+      { encoding: "utf-8" },
+    )).trim();
+    return output.length > 0 ? output : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistSpawnTimeoutDiagnostics(
+  cwd: string,
+  name: string,
+  diagnostics: SpawnTimeoutDiagnostics,
+): string | null {
+  try {
+    const baseDir = diagnosticsDir(cwd);
+    ensureDir(baseDir);
+    const fileName = `${Date.now()}-${name}.json`;
+    const filePath = path.join(baseDir, fileName);
+    writeJsonAtomic(filePath, diagnostics);
+    return filePath;
+  } catch {
+    return null;
+  }
+}
+
 async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + Math.max(0, timeoutMs);
   while (Date.now() < deadline) {
@@ -255,32 +468,45 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boole
   return !isPidAlive(pid);
 }
 
+function pidMatchesExpectation(meshPid: number, expectedPid?: number): boolean {
+  if (!expectedPid || !Number.isFinite(expectedPid) || expectedPid <= 0) {
+    return true;
+  }
+  const relation = resolvePidRelation(meshPid, expectedPid);
+  return relation === "exact" || relation === "descendant";
+}
+
 async function waitForMeshJoin(
   name: string,
   dirs: Dirs,
   timeoutMs: number,
   expectedPid?: number,
 ): Promise<Record<string, unknown> | null> {
-  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  const budgetMs = Math.max(1000, timeoutMs);
+  const deadline = Date.now() + budgetMs;
+  const pollMs = Math.max(250, Math.min(2000, Math.floor(budgetMs / 8)));
 
   while (Date.now() < deadline) {
     const reg = readMeshRegistration(name, dirs);
     if (reg) {
-      const pid = typeof reg.pid === "number" ? reg.pid : Number(reg.pid);
-      const pidOk = Number.isFinite(pid) && isPidAlive(pid);
-      const expectedOk = !expectedPid || pid === expectedPid;
+      const pid = parsePid(reg.pid);
+      const pidOk = !!pid && isPidAlive(pid);
+      const expectedOk = !!pid && pidMatchesExpectation(pid, expectedPid);
       if (pidOk && expectedOk) {
         return reg;
       }
     }
-    await sleep(2000);
+    await sleep(Math.min(pollMs, Math.max(50, deadline - Date.now())));
   }
 
   return null;
 }
 
 function formatModelLabel(agent: SpawnedAgent): string {
-  return agent.thinking ? `${agent.model}:${agent.thinking}` : agent.model;
+  if (agent.thinking && !modelHasThinkingSuffix(agent.model)) {
+    return `${agent.model}:${agent.thinking}`;
+  }
+  return agent.model;
 }
 
 function resolveThinking(params: CrewParams, defaultThinking: string): string {
@@ -345,6 +571,63 @@ async function maybeBootstrapMemory(
   return recalled.results.length;
 }
 
+async function collectSpawnTimeoutDiagnostics(
+  name: string,
+  model: string,
+  thinking: string,
+  backend: "tmux" | "headless",
+  timeoutMs: number,
+  expectedPid: number,
+  tmuxPaneId: string | null,
+  tmuxWindowId: string | null,
+  dirs: Dirs,
+): Promise<SpawnTimeoutDiagnostics> {
+  const meshRegistration = readMeshRegistration(name, dirs);
+  const meshPid = parsePid(meshRegistration?.pid);
+  const meshPidRelation = resolvePidRelation(meshPid, expectedPid);
+  const notes: string[] = [];
+
+  if (meshRegistration && meshPidRelation === "mismatch") {
+    notes.push("mesh_pid_mismatch");
+  }
+
+  const expectedPidAliveBeforeKill = isPidAlive(expectedPid);
+  const meshPidAliveAtTimeout = meshPid ? isPidAlive(meshPid) : false;
+  const tmuxPaneTail = backend === "tmux"
+    ? captureTmuxPaneTail(tmuxPaneId, SPAWN_DIAGNOSTIC_TMUX_LINES)
+    : null;
+
+  return {
+    name,
+    model,
+    thinking,
+    backend,
+    timeoutMs,
+    expectedPid,
+    meshPid,
+    meshPidRelation,
+    expectedPidAliveBeforeKill,
+    expectedPidAliveAfterKill: expectedPidAliveBeforeKill,
+    meshPidAliveAtTimeout,
+    pidSnapshotExpected: capturePidSnapshot(expectedPid),
+    pidSnapshotMesh: meshPid ? capturePidSnapshot(meshPid) : null,
+    meshRegistration,
+    tmuxPaneId,
+    tmuxWindowId,
+    tmuxPaneTail,
+    headlessTail: backend === "headless"
+      ? captureHeadlessTail(name, SPAWN_DIAGNOSTIC_LOG_LINES)
+      : [],
+    signals: {
+      sentSigterm: false,
+      exitedAfterSigterm: false,
+      sentSigkill: false,
+    },
+    notes,
+    createdAt: new Date().toISOString(),
+  };
+}
+
 export async function executeSpawn(
   params: CrewParams,
   state: MessengerState,
@@ -376,6 +659,7 @@ export async function executeSpawn(
 
   const model = params.model?.trim() || profileModel?.model || config.orchestrator.defaultModel;
   const thinking = resolveThinking(params, config.orchestrator.defaultThinking);
+  const spawnTimeoutMs = resolveSpawnTimeoutMs(params, config, model, thinking);
   const spawnWorkstream = resolveWorkstream(params);
   const name = resolveSpawnName(params.name, dirs, cwd);
 
@@ -398,16 +682,17 @@ export async function executeSpawn(
 
   if (backend === "tmux") {
     try {
+      const piArgs: string[] = [];
+      pushModelArgs(piArgs, model);
+      if (thinking && !modelHasThinkingSuffix(model)) {
+        piArgs.push("--thinking", thinking);
+      }
+      piArgs.push("--extension", EXTENSION_DIR, initialPrompt);
+
       const command = [
         `PI_AGENT_NAME=${shellEscape(name)}`,
         "pi",
-        "--model",
-        shellEscape(model),
-        "--thinking",
-        shellEscape(thinking),
-        "--extension",
-        shellEscape(EXTENSION_DIR),
-        shellEscape(initialPrompt),
+        ...piArgs.map(shellEscape),
       ].join(" ");
 
       const output = String(execFileSync(
@@ -427,13 +712,16 @@ export async function executeSpawn(
       );
     }
   } else {
-    const args = [
-      "--model", model,
-      "--thinking", thinking,
+    const args: string[] = [];
+    pushModelArgs(args, model);
+    if (thinking && !modelHasThinkingSuffix(model)) {
+      args.push("--thinking", thinking);
+    }
+    args.push(
       "--extension", EXTENSION_DIR,
       "--no-session",
       initialPrompt,
-    ];
+    );
 
     const proc = spawn("pi", args, {
       cwd,
@@ -485,21 +773,82 @@ export async function executeSpawn(
     backend,
   }, cwd);
 
-  const joined = await waitForMeshJoin(name, dirs, config.orchestrator.spawnTimeoutMs, pid || undefined);
+  const joined = await waitForMeshJoin(name, dirs, spawnTimeoutMs, pid || undefined);
   if (!joined) {
+    const diagnostics = await collectSpawnTimeoutDiagnostics(
+      name,
+      model,
+      thinking,
+      backend,
+      spawnTimeoutMs,
+      pid,
+      tmuxPaneId,
+      tmuxWindowId,
+      dirs,
+    );
+
+    diagnostics.signals.sentSigterm = true;
     safeKill(pid, "SIGTERM");
-    await waitForProcessExit(pid, 2000);
-    safeKill(pid, "SIGKILL");
+    diagnostics.signals.exitedAfterSigterm = await waitForProcessExit(pid, 2500);
+
+    if (!diagnostics.signals.exitedAfterSigterm) {
+      diagnostics.signals.sentSigkill = true;
+      safeKill(pid, "SIGKILL");
+    }
+
+    diagnostics.expectedPidAliveAfterKill = isPidAlive(pid);
 
     const existing = getSpawned(name, cwd);
     if (existing) {
+      if (backend === "tmux" && !diagnostics.tmuxPaneTail) {
+        diagnostics.tmuxPaneTail = captureTmuxPaneTail(existing.tmuxPaneId, SPAWN_DIAGNOSTIC_TMUX_LINES);
+      }
+      cleanupTmuxPane(existing);
       transitionState(name, "dead", cwd);
       unregisterSpawned(name, cwd);
+    } else if (backend === "tmux" && tmuxPaneId) {
+      try {
+        execFileSync("tmux", ["kill-pane", "-t", tmuxPaneId], { stdio: "ignore" });
+      } catch {
+        // ignore
+      }
     }
 
+    headlessRuntimes.delete(name);
+
+    const diagnosticsPath = persistSpawnTimeoutDiagnostics(cwd, name, diagnostics);
+
+    logHistory({
+      event: "reap",
+      agent: name,
+      timestamp: new Date().toISOString(),
+      details: {
+        reason: "spawn_timeout",
+        backend,
+        model,
+        thinking,
+        pid,
+        timeoutMs: spawnTimeoutMs,
+        diagnosticsPath,
+        meshPid: diagnostics.meshPid,
+        meshPidRelation: diagnostics.meshPidRelation,
+      },
+    }, cwd);
+
+    const timeoutSeconds = Math.max(1, Math.floor(spawnTimeoutMs / 1000));
+    const diagnosticsHint = diagnosticsPath ? ` Diagnostics: ${diagnosticsPath}` : "";
+
     return result(
-      `Error: ${name} did not join the mesh within ${Math.floor(config.orchestrator.spawnTimeoutMs / 1000)}s.`,
-      { mode: "spawn", error: "spawn_timeout", name },
+      `Error: ${name} did not join the mesh within ${timeoutSeconds}s.${diagnosticsHint}`,
+      {
+        mode: "spawn",
+        error: "spawn_timeout",
+        name,
+        timeoutMs: spawnTimeoutMs,
+        diagnosticsPath,
+        meshPid: diagnostics.meshPid,
+        meshPidRelation: diagnostics.meshPidRelation,
+      },
     );
   }
 
@@ -507,6 +856,7 @@ export async function executeSpawn(
   if (current) {
     registerSpawned({
       ...current,
+      pid: parsePid(joined.pid) ?? current.pid,
       sessionId: typeof joined.sessionId === "string" ? joined.sessionId : "",
       status: "joined",
       lastActivityAt: parseLastActivityMs(joined),
@@ -540,6 +890,7 @@ export async function executeSpawn(
       model,
       thinking,
       pid,
+      spawnTimeoutMs,
       tmuxPaneId,
       tmuxWindowId,
       memoryInjected,
@@ -550,7 +901,9 @@ export async function executeSpawn(
   }, cwd);
   logFeedEvent(cwd, state.agentName, "message", name, `spawned ${name} (${backend})`);
 
-  const modelLabel = thinking ? `${model}:${thinking}` : model;
+  const modelLabel = thinking && !modelHasThinkingSuffix(model)
+    ? `${model}:${thinking}`
+    : model;
   const profileLabel = profileModel ? ` via profile '${profileModel.profile}'` : "";
 
   return result(
@@ -561,6 +914,7 @@ export async function executeSpawn(
       model,
       thinking,
       backend,
+      timeoutMs: spawnTimeoutMs,
       tmuxPane: tmuxPaneId,
       tmuxWindow: tmuxWindowId,
       status: "idle",

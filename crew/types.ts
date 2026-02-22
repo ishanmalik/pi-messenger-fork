@@ -107,6 +107,8 @@ export interface CrewParams {
   workstream?: string;
   task?: string;
   lines?: number;
+  spawnTimeoutMs?: number;
+  timeoutMs?: number;
 
   // Task reset
   cascade?: boolean;
