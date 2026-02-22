@@ -115,6 +115,76 @@ function resolveSpawnName(requested: string | undefined, dirs: Dirs, cwd: string
   return null;
 }
 
+interface SpawnProfileModel {
+  profile: string;
+  model: string;
+  filePath: string;
+}
+
+function extractFrontmatter(content: string): string {
+  const normalized = content.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) return "";
+  const endIdx = normalized.indexOf("\n---", 4);
+  if (endIdx === -1) return "";
+  return normalized.slice(4, endIdx);
+}
+
+function extractFrontmatterValue(frontmatter: string, key: string): string | null {
+  const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
+  if (!match) return null;
+  const raw = match[1].trim();
+  if (!raw) return null;
+  return raw.replace(/^['\"]|['\"]$/g, "");
+}
+
+function loadProfileModelFromFile(filePath: string): SpawnProfileModel | null {
+  if (!fs.existsSync(filePath)) return null;
+
+  let content = "";
+  try {
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  const frontmatter = extractFrontmatter(content);
+  if (!frontmatter) return null;
+
+  const profile = extractFrontmatterValue(frontmatter, "name")
+    ?? path.basename(filePath, ".md");
+  const model = extractFrontmatterValue(frontmatter, "model");
+  if (!model) return null;
+
+  return { profile, model, filePath };
+}
+
+function resolveProfileModel(cwd: string, profileName: string): SpawnProfileModel | null {
+  const agentsDir = path.join(cwd, ".pi", "agents");
+  const directPath = path.join(agentsDir, `${profileName}.md`);
+  const direct = loadProfileModelFromFile(directPath);
+  if (direct) return direct;
+
+  if (!fs.existsSync(agentsDir)) return null;
+
+  let entries: string[] = [];
+  try {
+    entries = fs.readdirSync(agentsDir);
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith(".md")) continue;
+    const candidate = loadProfileModelFromFile(path.join(agentsDir, entry));
+    if (!candidate) continue;
+    if (candidate.profile === profileName) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 function clearInbox(dirs: Dirs, name: string): void {
   const inbox = path.join(dirs.inbox, name);
   try { fs.rmSync(inbox, { recursive: true, force: true }); } catch {}
@@ -282,7 +352,19 @@ export async function executeSpawn(
     );
   }
 
-  const model = params.model?.trim() || config.orchestrator.defaultModel;
+  const requestedProfile = params.profile?.trim();
+  const profileModel = requestedProfile
+    ? resolveProfileModel(cwd, requestedProfile)
+    : null;
+
+  if (requestedProfile && !profileModel) {
+    return result(
+      `Error: profile '${requestedProfile}' not found (or missing model) in ${path.join(cwd, ".pi", "agents")}.`,
+      { mode: "spawn", error: "profile_not_found", profile: requestedProfile },
+    );
+  }
+
+  const model = params.model?.trim() || profileModel?.model || config.orchestrator.defaultModel;
   const thinking = resolveThinking(params, config.orchestrator.defaultThinking);
   const name = resolveSpawnName(params.name, dirs, cwd);
 
@@ -440,14 +522,25 @@ export async function executeSpawn(
     event: "spawn",
     agent: name,
     timestamp: new Date().toISOString(),
-    details: { backend, model, thinking, pid, tmuxPaneId, tmuxWindowId, memoryInjected },
+    details: {
+      backend,
+      model,
+      thinking,
+      pid,
+      tmuxPaneId,
+      tmuxWindowId,
+      memoryInjected,
+      profile: profileModel?.profile ?? requestedProfile ?? null,
+      profileFile: profileModel?.filePath ?? null,
+    },
   }, cwd);
   logFeedEvent(cwd, state.agentName, "message", name, `spawned ${name} (${backend})`);
 
   const modelLabel = thinking ? `${model}:${thinking}` : model;
+  const profileLabel = profileModel ? ` via profile '${profileModel.profile}'` : "";
 
   return result(
-    `Spawned ${name} (${modelLabel}) via ${backend}. Status: idle.`,
+    `Spawned ${name} (${modelLabel}) via ${backend}${profileLabel}. Status: idle.`,
     {
       mode: "spawn",
       name,
@@ -458,6 +551,8 @@ export async function executeSpawn(
       tmuxWindow: tmuxWindowId,
       status: "idle",
       memoryInjected,
+      profile: profileModel?.profile ?? null,
+      profileFile: profileModel?.filePath ?? null,
     },
   );
 }

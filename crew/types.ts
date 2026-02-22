@@ -103,6 +103,7 @@ export interface CrewParams {
   thinking?: string;
 
   // Orchestrator
+  profile?: string;
   task?: string;
   lines?: number;
 

@@ -400,6 +400,7 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "review", target: "task-1" })          → Review impl
 
   // Orchestrator
+  pi_messenger({ action: "spawn", profile: "worker-xhigh", name: "Builder" })
   pi_messenger({ action: "spawn", model: "openai-codex/gpt-5.3-codex", name: "Builder", thinking: "xhigh" })
   pi_messenger({ action: "agents.list" })
   pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement X" })
@@ -443,6 +444,7 @@ Usage (action-based API - preferred):
       autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
+      profile: Type.Optional(Type.String({ description: "Spawn profile name from .pi/agents (maps model/provider only)" })),
       thinking: Type.Optional(Type.String({ description: "Thinking level override (e.g., high, xhigh)" })),
       task: Type.Optional(Type.String({ description: "Task description for agents.assign" })),
       lines: Type.Optional(Type.Number({ description: "Number of lines for agents.logs (default 50)" })),
