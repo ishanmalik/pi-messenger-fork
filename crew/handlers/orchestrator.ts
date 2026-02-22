@@ -748,6 +748,229 @@ export async function executeAgentsLogs(
   });
 }
 
+export async function executeAgentsAssign(
+  params: CrewParams,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const name = params.name;
+  const task = params.task?.trim();
+
+  if (!name) {
+    return result("Error: agents.assign requires name.", {
+      mode: "agents.assign",
+      error: "missing_name",
+    });
+  }
+
+  if (!task) {
+    return result("Error: agents.assign requires task.", {
+      mode: "agents.assign",
+      error: "missing_task",
+    });
+  }
+
+  const config = loadCrewConfig(crewStore.getCrewDir(cwd));
+  const agent = getSpawned(name, cwd);
+  if (!agent) {
+    return result(`Error: agent ${name} not found.`, {
+      mode: "agents.assign",
+      error: "not_found",
+      name,
+    });
+  }
+
+  if (agent.status === "assigned") {
+    return result("Error: Agent already has a task. Wait for completion or kill.", {
+      mode: "agents.assign",
+      error: "already_assigned",
+      name,
+    });
+  }
+
+  if (agent.status === "spawning") {
+    return result("Error: Agent still starting up.", {
+      mode: "agents.assign",
+      error: "still_spawning",
+      name,
+    });
+  }
+
+  if (agent.status === "dead" || agent.status === "done") {
+    return result("Error: Agent is no longer running.", {
+      mode: "agents.assign",
+      error: "not_running",
+      name,
+    });
+  }
+
+  if (agent.status === "joined") {
+    transitionState(name, "idle", cwd);
+  }
+
+  const latest = getSpawned(name, cwd);
+  if (!latest || latest.status !== "idle") {
+    return result(`Error: ${name} is not idle and cannot receive assignment.`, {
+      mode: "agents.assign",
+      error: "not_idle",
+      name,
+      status: latest?.status,
+    });
+  }
+
+  let memoryContext = "";
+  let memoryCount = 0;
+  if (config.orchestrator.memory.enabled) {
+    try {
+      const store = await ensureMemory(cwd);
+      if (store && store.enabled && !store.degraded) {
+        const recalled = await recall(store, task, {
+          topk: config.orchestrator.memory.autoInjectTopK,
+          minSimilarity: config.orchestrator.memory.minSimilarity,
+          maxTokens: config.orchestrator.memory.maxInjectionTokens,
+        });
+        if (recalled.results.length > 0) {
+          memoryCount = recalled.results.length;
+          const lines = recalled.results.map((entry) => {
+            const age = formatDuration(Math.max(0, Date.now() - entry.createdAtMs));
+            return `- [${entry.agent}, ${age} ago]: ${entry.text}`;
+          });
+          memoryContext = `## Context from prior work\n${lines.join("\n")}\n\n`;
+        }
+      }
+    } catch {
+      memoryCount = 0;
+    }
+  }
+
+  const assignmentDM = `# Task Assignment\n\n${memoryContext}## Your Task\n${task}\n\n## When Done\nCall: pi_messenger({ action: "agents.done", summary: "Brief description of what you did" })`;
+
+  try {
+    messengerStore.sendMessageToAgent(state, dirs, name, assignmentDM);
+  } catch (error) {
+    return result(`Error: failed to send assignment to ${name}: ${error instanceof Error ? error.message : "unknown"}`, {
+      mode: "agents.assign",
+      error: "send_failed",
+      name,
+    });
+  }
+
+  registerSpawned({
+    ...latest,
+    status: "assigned",
+    assignedTask: task,
+    lastActivityAt: Date.now(),
+  }, cwd);
+
+  logHistory({
+    event: "assign",
+    agent: name,
+    timestamp: new Date().toISOString(),
+    details: { task, memoryContextInjected: memoryCount > 0, memoryContextCount: memoryCount },
+  }, cwd);
+  logFeedEvent(cwd, state.agentName, "message", name, `assigned task: ${task.slice(0, 120)}`);
+
+  return result(`Assigned task to ${name}.${memoryCount > 0 ? ` Injected ${memoryCount} memory snippet(s).` : ""}`, {
+    mode: "agents.assign",
+    name,
+    assigned: true,
+    task,
+    memoryContextInjected: memoryCount > 0,
+    memoryContextCount: memoryCount,
+  });
+}
+
+export async function executeAgentsDone(
+  params: CrewParams,
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  const cwd = ctx.cwd ?? process.cwd();
+  const callerName = state.agentName;
+  const summary = params.summary?.trim() || "Task completed.";
+
+  const agent = getSpawned(callerName, cwd);
+  if (!agent) {
+    return result("Error: You are not a spawned orchestrator agent.", {
+      mode: "agents.done",
+      error: "not_spawned_agent",
+      caller: callerName,
+    });
+  }
+
+  if (agent.status !== "assigned") {
+    return result(`Error: Agent is in status '${agent.status}', expected 'assigned'.`, {
+      mode: "agents.done",
+      error: "invalid_state",
+      status: agent.status,
+    });
+  }
+
+  const config = loadCrewConfig(crewStore.getCrewDir(cwd));
+
+  if (config.orchestrator.memory.enabled) {
+    try {
+      const store = await ensureMemory(cwd);
+      if (store && store.enabled && !store.degraded) {
+        await remember(store, summary, {
+          agent: callerName,
+          type: "summary",
+          source: "agents.done",
+          taskId: agent.assignedTask ?? undefined,
+          files: state.session.filesModified,
+        });
+      }
+    } catch {
+      // best effort
+    }
+  }
+
+  try {
+    messengerStore.sendMessageToAgent(
+      state,
+      dirs,
+      agent.spawnedBy,
+      `✅ ${callerName} completed: ${summary}`,
+    );
+  } catch {
+    // best effort
+  }
+
+  logHistory({
+    event: "done",
+    agent: callerName,
+    timestamp: new Date().toISOString(),
+    details: { summary, task: agent.assignedTask, autoKill: config.orchestrator.autoKillOnDone },
+  }, cwd);
+
+  if (!config.orchestrator.autoKillOnDone) {
+    registerSpawned({
+      ...agent,
+      status: "idle",
+      assignedTask: null,
+      lastActivityAt: Date.now(),
+    }, cwd);
+
+    return result("Marked task done and returned to idle.", {
+      mode: "agents.done",
+      done: true,
+      autoKill: false,
+    });
+  }
+
+  await sleep(5000);
+  await killOne(callerName, state, dirs, ctx, { skipSummary: true });
+
+  return result("Marked task done. Auto-kill executed.", {
+    mode: "agents.done",
+    done: true,
+    autoKill: true,
+  });
+}
+
 export async function execute(
   op: string,
   params: CrewParams,
@@ -764,6 +987,12 @@ export async function execute(
 
     case "killall":
       return executeAgentsKillall(state, dirs, ctx);
+
+    case "assign":
+      return executeAgentsAssign(params, state, dirs, ctx);
+
+    case "done":
+      return executeAgentsDone(params, state, dirs, ctx);
 
     case "logs":
       return executeAgentsLogs(params, ctx);
