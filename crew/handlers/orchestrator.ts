@@ -1050,6 +1050,12 @@ async function killOne(
 
   let exited = await waitForProcessExit(agent.pid, config.orchestrator.gracePeriodMs);
   if (!exited) {
+    // Re-fetch state after grace period: another concurrent operation may have
+    // transitioned the agent away from "done" during the wait.
+    const agentAfterGrace = getSpawned(name, cwd);
+    if (!agentAfterGrace || agentAfterGrace.status !== "done") {
+      return { ok: true, noOp: true };
+    }
     safeKill(agent.pid, "SIGTERM");
     exited = await waitForProcessExit(agent.pid, 5000);
   }
