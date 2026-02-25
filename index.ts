@@ -65,6 +65,14 @@ import { runLegacyAgentCleanupMigration } from "./crew/utils/install.js";
 import { getLiveWorkers, onLiveWorkersChanged } from "./crew/live-progress.js";
 import { shutdownAllWorkers } from "./crew/agents.js";
 import { shutdownLobbyWorkers } from "./crew/lobby.js";
+import {
+  checkSpawnedAgentHealth,
+  checkIdleAgents,
+  isOrchestrator,
+  reapOrphans,
+  killAllSpawned,
+} from "./crew/orchestrator/registry.js";
+import { closeMemory } from "./crew/orchestrator/memory.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -299,7 +307,31 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   function startStatusHeartbeat(): void {
     if (statusHeartbeatTimer) return;
     statusHeartbeatTimer = setInterval(() => {
-      if (latestCtx) updateStatus(latestCtx);
+      if (!latestCtx) return;
+
+      updateStatus(latestCtx);
+
+      if (!isOrchestrator()) return;
+
+      try {
+        const cwd = latestCtx.cwd ?? process.cwd();
+        const reaped = checkSpawnedAgentHealth(cwd);
+        if (reaped.length > 0 && latestCtx.hasUI) {
+          for (const name of reaped) {
+            latestCtx.ui.notify(`⚠️ Spawned agent ${name} died unexpectedly`, "warning");
+          }
+        }
+
+        const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+        const idle = checkIdleAgents(crewConfig.orchestrator.idleTimeoutMs, cwd);
+        if (idle.length > 0 && latestCtx.hasUI) {
+          for (const item of idle) {
+            latestCtx.ui.notify(`⏰ ${item.name} idle for ${item.idleFor}. Kill? agents.kill({ name: "${item.name}" })`, "info");
+          }
+        }
+      } catch (error) {
+        console.warn(`[pi-messenger][orchestrator] heartbeat monitor failed: ${error instanceof Error ? error.message : "unknown"}`);
+      }
     }, STATUS_HEARTBEAT_MS);
   }
 
@@ -369,7 +401,18 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "task.reset", id: "task-1" })          → Reset task
   
   // Crew: Review
-  pi_messenger({ action: "review", target: "task-1" })          → Review impl`,
+  pi_messenger({ action: "review", target: "task-1" })          → Review impl
+
+  // Orchestrator
+  pi_messenger({ action: "spawn", profile: "worker-xhigh", name: "Builder" })
+  pi_messenger({ action: "spawn", model: "openai-codex/gpt-5.3-codex", name: "Builder", thinking: "xhigh" })
+  pi_messenger({ action: "agents.list" })
+  pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement X", workstream: "feature-x" })
+  pi_messenger({ action: "agents.check", name: "Builder" })
+  pi_messenger({ action: "agents.logs", name: "Builder" })
+  pi_messenger({ action: "agents.kill", name: "Builder" })
+  pi_messenger({ action: "agents.killall" })
+  pi_messenger({ action: "agents.memory.stats" })`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -405,6 +448,11 @@ Usage (action-based API - preferred):
       autonomous: Type.Optional(Type.Boolean({ description: "Run work continuously until done/blocked" })),
       concurrency: Type.Optional(Type.Number({ description: "Override worker concurrency" })),
       model: Type.Optional(Type.String({ description: "Override worker model for this work wave" })),
+      profile: Type.Optional(Type.String({ description: "Spawn profile name from .pi/agents (maps model/provider only)" })),
+      workstream: Type.Optional(Type.String({ description: "Optional namespace/tag for memory isolation (e.g., cvi-wing, backtester)" })),
+      thinking: Type.Optional(Type.String({ description: "Thinking level override (e.g., high, xhigh)" })),
+      task: Type.Optional(Type.String({ description: "Task description for agents.assign" })),
+      lines: Type.Optional(Type.Number({ description: "Number of lines for agents.logs (default 50)" })),
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
@@ -755,10 +803,25 @@ Usage (action-based API - preferred):
         restoreAutonomousState(entry.data as Parameters<typeof restoreAutonomousState>[0]);
       }
     }
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    const cwd = ctx.cwd ?? process.cwd();
+    const { staleCleared } = restorePlanningState(cwd);
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
     }
+
+    try {
+      const reaped = reapOrphans(cwd);
+      if (reaped.length > 0 && ctx.hasUI) {
+        ctx.ui.notify(`Reaped ${reaped.length} orphaned agent(s): ${reaped.join(", ")}`, "info");
+      }
+    } catch (error) {
+      console.warn(`[pi-messenger][orchestrator] startup orphan reap failed: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+
+    // Intentionally skip orchestrator memory eager-init at session startup.
+    // Memory is initialized lazily when orchestrator actions actually use it.
+    // This avoids cross-extension noise (e.g. subagent sessions) and reduces
+    // RocksDB lock contention from unrelated parallel sessions.
 
     state.isHuman = ctx.hasUI;
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
@@ -1005,7 +1068,16 @@ Usage (action-based API - preferred):
   });
 
   pi.on("session_shutdown", async () => {
-    shutdownLobbyWorkers(process.cwd());
+    const cwd = process.cwd();
+
+    try {
+      killAllSpawned(cwd);
+      closeMemory();
+    } catch (error) {
+      console.warn(`[pi-messenger][orchestrator] shutdown cleanup failed: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+
+    shutdownLobbyWorkers(cwd);
     shutdownAllWorkers();
     stopStatusHeartbeat();
     overlayOpening = false;

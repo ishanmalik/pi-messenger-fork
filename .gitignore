@@ -1,2 +1,12 @@
 node_modules/
 *.DS_Store
+
+# local secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# orchestrator runtime artifacts
+.pi/messenger/orchestrator/
+.pi/messenger/feed.jsonl

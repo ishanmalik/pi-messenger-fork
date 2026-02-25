@@ -70,6 +70,44 @@ describe("crew/utils/config", () => {
     expect(cfg.work.maxAttemptsPerTask).toBe(5);
     expect(cfg.work.maxWaves).toBe(50);
     expect(cfg.work.stopOnBlock).toBe(false);
+    expect(cfg.orchestrator.defaultModel).toBe("anthropic/claude-sonnet-4-6");
+    expect(cfg.orchestrator.spawnTimeoutMs).toBe(30000);
+    expect(cfg.orchestrator.spawnTimeoutMaxMs).toBe(180000);
+    expect(cfg.orchestrator.spawnTimeoutSlowModelMultiplier).toBe(1.75);
+    expect(cfg.orchestrator.spawnTimeoutHighThinkingMultiplier).toBe(1.5);
+    expect(cfg.orchestrator.memory.enabled).toBe(true);
+    expect(cfg.orchestrator.memory.dimensions).toBe(1536);
+  });
+
+  it("deep merges orchestrator config without dropping nested defaults", async () => {
+    writeJson(path.join(dirs.crewDir, "config.json"), {
+      orchestrator: {
+        maxSpawnedAgents: 9,
+        spawnTimeoutMaxMs: 240000,
+        spawnTimeoutSlowModelMultiplier: 2,
+        memory: {
+          minSimilarity: 0.45,
+          ttlDays: {
+            message: 5,
+          },
+        },
+      },
+    });
+
+    const { loadCrewConfig } = await loadConfigModule();
+    const cfg = loadCrewConfig(dirs.crewDir);
+
+    expect(cfg.orchestrator.maxSpawnedAgents).toBe(9);
+    expect(cfg.orchestrator.spawnTimeoutMaxMs).toBe(240000);
+    expect(cfg.orchestrator.spawnTimeoutSlowModelMultiplier).toBe(2);
+    expect(cfg.orchestrator.spawnTimeoutHighThinkingMultiplier).toBe(1.5);
+    expect(cfg.orchestrator.memory.minSimilarity).toBe(0.45);
+    expect(cfg.orchestrator.memory.ttlDays.message).toBe(5);
+    expect(cfg.orchestrator.memory.ttlDays.discovery).toBe(30);
+    expect(cfg.orchestrator.memory.ttlDays.summary).toBe(90);
+    expect(cfg.orchestrator.memory.ttlDays.decision).toBe(90);
+    expect(cfg.orchestrator.memory.embeddingModel).toBe("gemini-embedding-001");
+    expect(cfg.orchestrator.memory.embeddingProvider).toBe("google");
   });
 
   it("supports dependencies config field defaults and overrides", async () => {

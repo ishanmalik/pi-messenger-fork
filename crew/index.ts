@@ -146,6 +146,30 @@ export async function executeCrewAction(
     // ═══════════════════════════════════════════════════════════════════════
     // Crew actions - Simplified PRD-based workflow
     // ═══════════════════════════════════════════════════════════════════════
+    case 'spawn': {
+      try {
+        const orchestratorHandlers = await import("./handlers/orchestrator.js");
+        return orchestratorHandlers.executeSpawn(params, state, dirs, ctx);
+      } catch (e) {
+        return result(`Error: spawn handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "spawn", error: "handler_error" });
+      }
+    }
+
+    case 'agents': {
+      if (!op) {
+        return result("Error: agents action requires operation (e.g., 'agents.list', 'agents.kill').",
+          { mode: "agents", error: "missing_operation" });
+      }
+      try {
+        const orchestratorHandlers = await import("./handlers/orchestrator.js");
+        return orchestratorHandlers.execute(op, params, state, dirs, ctx);
+      } catch (e) {
+        return result(`Error: agents.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+          { mode: "agents", error: "handler_error", operation: op });
+      }
+    }
+
     case 'task': {
       if (!op) {
         return result("Error: task action requires operation (e.g., 'task.show', 'task.list').",

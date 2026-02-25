@@ -100,6 +100,15 @@ export interface CrewParams {
   autonomous?: boolean;
   concurrency?: number;
   model?: string;
+  thinking?: string;
+
+  // Orchestrator
+  profile?: string;
+  workstream?: string;
+  task?: string;
+  lines?: number;
+  spawnTimeoutMs?: number;
+  timeoutMs?: number;
 
   // Task reset
   cascade?: boolean;

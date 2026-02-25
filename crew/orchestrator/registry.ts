@@ -1,0 +1,395 @@
+import * as fs from "node:fs";
+import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
+import { join, dirname } from "node:path";
+import { formatDuration } from "../../lib.js";
+import type { SpawnedAgent, SpawnedAgentStatus, HistoryEvent } from "./types.js";
+
+const spawnedByThisProcess = new Set<string>();
+const idleNotified = new Set<string>();
+const MAX_SPAWNING_AGE_MS = 180_000;
+
+const VALID_TRANSITIONS: Record<SpawnedAgentStatus, Set<SpawnedAgentStatus>> = {
+  spawning: new Set(["joined", "dead"]),
+  joined: new Set(["idle", "dead"]),
+  idle: new Set(["assigned", "done", "dead"]),
+  assigned: new Set(["idle", "done", "dead"]),
+  done: new Set(["dead"]),
+  dead: new Set(),
+};
+
+function ensureDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function writeJsonAtomic(filePath: string, data: unknown): void {
+  ensureDir(dirname(filePath));
+  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tempPath, JSON.stringify(data, null, 2));
+  fs.renameSync(tempPath, filePath);
+}
+
+function readJson<T>(filePath: string): T | null {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function isStatus(value: unknown): value is SpawnedAgentStatus {
+  return typeof value === "string"
+    && (value === "spawning"
+      || value === "joined"
+      || value === "idle"
+      || value === "assigned"
+      || value === "done"
+      || value === "dead");
+}
+
+function isSpawnedAgent(value: unknown): value is SpawnedAgent {
+  if (!value || typeof value !== "object") return false;
+  const v = value as SpawnedAgent;
+  return typeof v.name === "string"
+    && typeof v.pid === "number"
+    && typeof v.sessionId === "string"
+    && (typeof v.tmuxPaneId === "string" || v.tmuxPaneId === null)
+    && (typeof v.tmuxWindowId === "string" || v.tmuxWindowId === null)
+    && typeof v.model === "string"
+    && (v.thinking === undefined || typeof v.thinking === "string")
+    && isStatus(v.status)
+    && typeof v.spawnedAt === "number"
+    && typeof v.spawnedBy === "string"
+    && (typeof v.assignedTask === "string" || v.assignedTask === null)
+    && (v.currentWorkstream === undefined || typeof v.currentWorkstream === "string" || v.currentWorkstream === null)
+    && typeof v.lastActivityAt === "number"
+    && (v.backend === "tmux" || v.backend === "headless");
+}
+
+function orchestratorDir(cwd: string = process.cwd()): string {
+  return join(cwd, ".pi", "messenger", "orchestrator");
+}
+
+function agentsDir(cwd: string = process.cwd()): string {
+  return join(orchestratorDir(cwd), "agents");
+}
+
+function historyPath(cwd: string = process.cwd()): string {
+  return join(orchestratorDir(cwd), "history.jsonl");
+}
+
+function meshRegistryDir(): string {
+  const baseDir = process.env.PI_MESSENGER_DIR || join(homedir(), ".pi", "agent", "messenger");
+  return join(baseDir, "registry");
+}
+
+function agentFilePath(name: string, cwd: string = process.cwd()): string {
+  return join(agentsDir(cwd), `${name}.json`);
+}
+
+function canTransition(from: SpawnedAgentStatus, to: SpawnedAgentStatus): boolean {
+  if (from === to) return true;
+  return VALID_TRANSITIONS[from].has(to);
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parsePid(raw: unknown): number | null {
+  const pid = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(pid) || pid <= 0) return null;
+  return Math.floor(pid);
+}
+
+function readParentPid(pid: number): number | null {
+  try {
+    const output = String(execFileSync(
+      "ps",
+      ["-o", "ppid=", "-p", String(pid)],
+      { encoding: "utf-8" },
+    )).trim();
+    const parsed = Number(output);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDescendantPid(pid: number, ancestorPid: number): boolean {
+  if (!Number.isFinite(pid) || !Number.isFinite(ancestorPid)) return false;
+  if (pid <= 0 || ancestorPid <= 0) return false;
+  if (pid === ancestorPid) return true;
+
+  let current = pid;
+  for (let depth = 0; depth < 32; depth++) {
+    const parent = readParentPid(current);
+    if (!parent || parent <= 1) return false;
+    if (parent === ancestorPid) return true;
+    if (parent === current) return false;
+    current = parent;
+  }
+
+  return false;
+}
+
+function cleanupTmux(agent: SpawnedAgent): void {
+  if (!agent.tmuxPaneId) return;
+  try {
+    execFileSync("tmux", ["kill-pane", "-t", agent.tmuxPaneId], { stdio: "ignore" });
+  } catch {
+    // ignore
+  }
+}
+
+function findMeshRegistration(name: string): Record<string, unknown> | null {
+  const filePath = join(meshRegistryDir(), `${name}.json`);
+  return readJson<Record<string, unknown>>(filePath);
+}
+
+function markDeadAndDelete(agent: SpawnedAgent, cwd: string, reason: string): void {
+  const filePath = agentFilePath(agent.name, cwd);
+  try {
+    const dead: SpawnedAgent = {
+      ...agent,
+      status: "dead",
+      assignedTask: null,
+      lastActivityAt: Date.now(),
+    };
+    writeJsonAtomic(filePath, dead);
+  } catch {
+    // ignore
+  }
+
+  cleanupTmux(agent);
+
+  try {
+    fs.unlinkSync(filePath);
+  } catch {
+    // ignore
+  }
+
+  spawnedByThisProcess.delete(agent.name);
+  idleNotified.delete(agent.name);
+  logHistory({
+    event: "reap",
+    agent: agent.name,
+    timestamp: new Date().toISOString(),
+    details: {
+      reason,
+      pid: agent.pid,
+      previousStatus: agent.status,
+    },
+  }, cwd);
+}
+
+function shouldReap(agent: SpawnedAgent): string | null {
+  if (!isPidAlive(agent.pid)) {
+    return "pid_exited";
+  }
+
+  // While still spawning, allow mesh registration to appear asynchronously,
+  // but cap how long we tolerate startup to avoid stuck registry entries.
+  if (agent.status === "spawning") {
+    const spawnAgeMs = Math.max(0, Date.now() - agent.spawnedAt);
+    if (spawnAgeMs > MAX_SPAWNING_AGE_MS) {
+      return "spawn_timeout";
+    }
+    return null;
+  }
+
+  const reg = findMeshRegistration(agent.name);
+  if (!reg) {
+    return "mesh_missing";
+  }
+
+  const meshPid = parsePid(reg.pid);
+  if (!meshPid) {
+    return "mesh_pid_mismatch";
+  }
+
+  if (meshPid !== agent.pid && !isDescendantPid(meshPid, agent.pid)) {
+    return "mesh_pid_mismatch";
+  }
+
+  return null;
+}
+
+export function registerSpawned(agent: SpawnedAgent, cwd: string = process.cwd()): void {
+  writeJsonAtomic(agentFilePath(agent.name, cwd), agent);
+  if (agent.status !== "dead") {
+    spawnedByThisProcess.add(agent.name);
+  }
+}
+
+export function unregisterSpawned(name: string, cwd: string = process.cwd()): void {
+  try {
+    fs.unlinkSync(agentFilePath(name, cwd));
+  } catch {
+    // ignore
+  }
+  spawnedByThisProcess.delete(name);
+  idleNotified.delete(name);
+}
+
+export function getSpawned(name: string, cwd: string = process.cwd()): SpawnedAgent | null {
+  const parsed = readJson<unknown>(agentFilePath(name, cwd));
+  return isSpawnedAgent(parsed) ? parsed : null;
+}
+
+export function getAllSpawned(cwd: string = process.cwd()): SpawnedAgent[] {
+  const dir = agentsDir(cwd);
+  if (!fs.existsSync(dir)) return [];
+
+  const entries: SpawnedAgent[] = [];
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith(".json")) continue;
+    const parsed = readJson<unknown>(join(dir, file));
+    if (isSpawnedAgent(parsed)) {
+      entries.push(parsed);
+    }
+  }
+
+  return entries.sort((a, b) => a.spawnedAt - b.spawnedAt);
+}
+
+export function transitionState(
+  name: string,
+  to: SpawnedAgentStatus,
+  cwd: string = process.cwd(),
+): boolean {
+  const current = getSpawned(name, cwd);
+  if (!current) return false;
+  if (!canTransition(current.status, to)) return false;
+
+  const updated: SpawnedAgent = {
+    ...current,
+    status: to,
+    ...(to === "dead" ? { assignedTask: null } : {}),
+  };
+
+  registerSpawned(updated, cwd);
+  if (to === "dead") {
+    spawnedByThisProcess.delete(name);
+    idleNotified.delete(name);
+  }
+  return true;
+}
+
+export function isOrchestrator(): boolean {
+  if (spawnedByThisProcess.size > 0) return true;
+  return getAllSpawned().some(agent => agent.status !== "dead");
+}
+
+export function logHistory(event: HistoryEvent, cwd: string = process.cwd()): void {
+  const filePath = historyPath(cwd);
+  ensureDir(dirname(filePath));
+  try {
+    fs.appendFileSync(filePath, JSON.stringify(event) + "\n");
+  } catch {
+    // ignore
+  }
+}
+
+export function reapOrphans(cwd: string = process.cwd()): string[] {
+  const reaped: string[] = [];
+  const all = getAllSpawned(cwd);
+
+  for (const agent of all) {
+    if (agent.status === "dead") continue;
+    const reason = shouldReap(agent);
+    if (!reason) continue;
+
+    markDeadAndDelete(agent, cwd, reason);
+    reaped.push(agent.name);
+  }
+
+  return reaped;
+}
+
+export function checkSpawnedAgentHealth(cwd: string = process.cwd()): string[] {
+  return reapOrphans(cwd);
+}
+
+function parseLastActivityMs(agent: SpawnedAgent): number {
+  const reg = findMeshRegistration(agent.name);
+  const activity = reg?.activity as Record<string, unknown> | undefined;
+  const iso = typeof activity?.lastActivityAt === "string" ? activity.lastActivityAt : null;
+  if (!iso) return agent.lastActivityAt;
+  const parsed = Date.parse(iso);
+  if (!Number.isFinite(parsed)) return agent.lastActivityAt;
+  return parsed;
+}
+
+export function checkIdleAgents(
+  idleTimeoutMs: number,
+  cwd: string = process.cwd(),
+): Array<{ name: string; idleFor: string }> {
+  const warnings: Array<{ name: string; idleFor: string }> = [];
+  const now = Date.now();
+  const activeIdleNames = new Set<string>();
+
+  for (const agent of getAllSpawned(cwd)) {
+    if (agent.status !== "idle") {
+      idleNotified.delete(agent.name);
+      continue;
+    }
+
+    activeIdleNames.add(agent.name);
+
+    const lastActivityMs = parseLastActivityMs(agent);
+    if (lastActivityMs > agent.lastActivityAt) {
+      registerSpawned({
+        ...agent,
+        lastActivityAt: lastActivityMs,
+      }, cwd);
+    }
+
+    const idleMs = Math.max(0, now - lastActivityMs);
+    if (idleMs <= idleTimeoutMs) {
+      idleNotified.delete(agent.name);
+      continue;
+    }
+
+    if (!idleNotified.has(agent.name)) {
+      idleNotified.add(agent.name);
+      warnings.push({
+        name: agent.name,
+        idleFor: formatDuration(idleMs),
+      });
+    }
+  }
+
+  for (const name of Array.from(idleNotified)) {
+    if (!activeIdleNames.has(name)) {
+      idleNotified.delete(name);
+    }
+  }
+
+  return warnings;
+}
+
+export function killAllSpawned(cwd: string = process.cwd()): void {
+  const all = getAllSpawned(cwd);
+  for (const agent of all) {
+    if (agent.status === "dead") {
+      unregisterSpawned(agent.name, cwd);
+      continue;
+    }
+    try {
+      process.kill(agent.pid, "SIGTERM");
+    } catch {
+      // ignore
+    }
+    cleanupTmux(agent);
+    unregisterSpawned(agent.name, cwd);
+  }
+}

@@ -27,6 +27,7 @@ import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
+import { isOrchestrator } from "./crew/orchestrator/registry.js";
 
 let messagesSentThisSession = 0;
 
@@ -277,10 +278,16 @@ export function executeSend(
 
   const crewDir = crewStore.getCrewDir(cwd);
   const crewConfig = loadCrewConfig(crewDir);
-  const budget = crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10;
+  const orchestratorSession = isOrchestrator();
+  const budget = orchestratorSession
+    ? (crewConfig.orchestrator?.messageBudget ?? 100)
+    : (crewConfig.messageBudgets?.[crewConfig.coordination] ?? 10);
   if (messagesSentThisSession >= budget) {
+    const context = orchestratorSession
+      ? "orchestrator session"
+      : `${crewConfig.coordination} level`;
     return result(
-      `Message budget reached (${messagesSentThisSession}/${budget} for ${crewConfig.coordination} level). Focus on your task.`,
+      `Message budget reached (${messagesSentThisSession}/${budget} for ${context}). Focus on your task.`,
       { mode: "send", error: "budget_exceeded" }
     );
   }
