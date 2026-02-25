@@ -18,6 +18,7 @@ const SCHEMA_VERSION = 2;
 const CIRCUIT_BREAKER_FAILURES = 3;
 const CIRCUIT_BREAKER_COOLDOWN_MS = 60_000;
 const MAX_AGENT_SHARE = 0.4;
+const ZVEC_RETRY_MS = 30_000;
 const CORRUPTION_HINTS = [
   "corrupt",
   "corruption",
@@ -32,6 +33,8 @@ const CORRUPTION_HINTS = [
 
 let activeStore: MemoryStore | null = null;
 let zvecRuntimeCache: Record<string, unknown> | null | undefined;
+let zvecLastFailureAt = 0;
+let mutationQueue: Promise<void> = Promise.resolve();
 
 class SchemaMismatchError extends Error {}
 class HealthcheckError extends Error {
@@ -68,6 +71,10 @@ function backupRoot(projectDir: string): string {
   return join(projectDir, ".pi", "messenger", "orchestrator", "memory-backups");
 }
 
+function breakerStatePath(projectDir: string): string {
+  return join(projectDir, ".pi", "messenger", "orchestrator", "memory-breaker.json");
+}
+
 function timestampTag(date = new Date()): string {
   const iso = date.toISOString();
   return iso.replace(/[:.]/g, "-");
@@ -87,6 +94,21 @@ function safeParseJson<T>(value: string): T | null {
     return JSON.parse(value) as T;
   } catch {
     return null;
+  }
+}
+
+async function withMutationLock<T>(work: () => T | Promise<T>): Promise<T> {
+  const previous = mutationQueue;
+  let release: () => void = () => {};
+  mutationQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
   }
 }
 
@@ -169,17 +191,56 @@ function breakerOpen(store: MemoryStore): boolean {
   return Date.now() < store.breakerOpenUntil;
 }
 
+function persistBreakerState(store: MemoryStore): void {
+  const filePath = breakerStatePath(store.projectDir);
+  try {
+    writeJsonAtomic(filePath, {
+      consecutiveEmbeddingFailures: store.consecutiveEmbeddingFailures,
+      breakerOpenUntil: store.breakerOpenUntil,
+      lastError: store.lastError,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch {
+    // best effort
+  }
+}
+
+function loadBreakerState(store: MemoryStore): void {
+  const filePath = breakerStatePath(store.projectDir);
+  if (!fs.existsSync(filePath)) return;
+
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    parsed = safeParseJson<Record<string, unknown>>(raw);
+  } catch {
+    return;
+  }
+  if (!parsed) return;
+
+  const consecutive = Number(parsed.consecutiveEmbeddingFailures ?? 0);
+  const openUntil = Number(parsed.breakerOpenUntil ?? 0);
+  const lastError = typeof parsed.lastError === "string" ? parsed.lastError : undefined;
+
+  store.consecutiveEmbeddingFailures = Number.isFinite(consecutive) ? Math.max(0, Math.floor(consecutive)) : 0;
+  store.breakerOpenUntil = Number.isFinite(openUntil) ? Math.max(0, Math.floor(openUntil)) : 0;
+  store.lastError = lastError;
+}
+
 function markEmbeddingFailure(store: MemoryStore, error: string): void {
   store.lastError = error;
   store.consecutiveEmbeddingFailures += 1;
   if (store.consecutiveEmbeddingFailures >= CIRCUIT_BREAKER_FAILURES) {
     store.breakerOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
   }
+  persistBreakerState(store);
 }
 
 function markEmbeddingSuccess(store: MemoryStore): void {
   store.consecutiveEmbeddingFailures = 0;
   store.breakerOpenUntil = 0;
+  store.lastError = undefined;
+  persistBreakerState(store);
 }
 
 function defaultStats(store: MemoryStore): MemoryStats {
@@ -222,15 +283,26 @@ function createStore(projectDir: string, config: MemoryConfig): MemoryStore {
 }
 
 async function getZvecRuntime(): Promise<Record<string, unknown> | null> {
-  if (zvecRuntimeCache !== undefined) return zvecRuntimeCache;
+  if (zvecRuntimeCache) return zvecRuntimeCache;
+
+  if (zvecRuntimeCache === null) {
+    const retryIn = zvecLastFailureAt + ZVEC_RETRY_MS - Date.now();
+    if (retryIn > 0) {
+      return null;
+    }
+  }
+
   try {
     const runtime = await import("@zvec/zvec");
     zvecRuntimeCache = runtime as Record<string, unknown>;
+    zvecLastFailureAt = 0;
+    return zvecRuntimeCache;
   } catch (error) {
     console.warn(`[pi-messenger][orchestrator] zvec unavailable: ${error instanceof Error ? error.message : "unknown error"}`);
     zvecRuntimeCache = null;
+    zvecLastFailureAt = Date.now();
+    return null;
   }
-  return zvecRuntimeCache;
 }
 
 function runtimeOrThrow(runtime: Record<string, unknown>, key: string): unknown {
@@ -619,6 +691,7 @@ function attemptSelfHeal(
 
 export async function initMemory(projectDir: string, config: MemoryConfig): Promise<MemoryStore> {
   const store = createStore(projectDir, config);
+  loadBreakerState(store);
 
   if (!config.enabled) {
     activeStore = store;
@@ -723,36 +796,46 @@ export async function remember(
   const now = Date.now();
   const id = `${now}-${randomUUID().slice(0, 8)}`;
 
-  try {
-    const status = store.collection.insertSync({
-      id,
-      vectors: { [VECTOR_FIELD]: embedded.vector },
-      fields: {
-        agent: metadata.agent,
-        type: metadata.type,
-        source: metadata.source,
-        timestamp: new Date(now).toISOString(),
-        createdAtMs: now,
-        taskId: metadata.taskId ?? "",
-        workstream: metadata.workstream?.trim() ?? "",
-        files: JSON.stringify(metadata.files ?? []),
-        contentHash: hash,
-        schemaVersion: SCHEMA_VERSION,
-        embeddingModel: store.config.embeddingModel,
-        embeddingDimensions: store.config.dimensions,
-        text: trimmed,
-      },
-    }) as { ok?: boolean; message?: string };
-
-    if (!status || status.ok !== true) {
-      return { ok: false, degraded: true, error: status?.message ?? "insert_failed" };
+  return withMutationLock(() => {
+    if (!store.collection) {
+      return { ok: false, degraded: true, error: "memory_unavailable" };
     }
 
-    evictIfNeeded(store);
-    return { ok: true };
-  } catch (error) {
-    return { ok: false, degraded: true, error: error instanceof Error ? error.message : "insert_failed" };
-  }
+    if (hasContentHash(store, hash)) {
+      return { ok: true };
+    }
+
+    try {
+      const status = store.collection.insertSync({
+        id,
+        vectors: { [VECTOR_FIELD]: embedded.vector },
+        fields: {
+          agent: metadata.agent,
+          type: metadata.type,
+          source: metadata.source,
+          timestamp: new Date(now).toISOString(),
+          createdAtMs: now,
+          taskId: metadata.taskId ?? "",
+          workstream: metadata.workstream?.trim() ?? "",
+          files: JSON.stringify(metadata.files ?? []),
+          contentHash: hash,
+          schemaVersion: SCHEMA_VERSION,
+          embeddingModel: store.config.embeddingModel,
+          embeddingDimensions: store.config.dimensions,
+          text: trimmed,
+        },
+      }) as { ok?: boolean; message?: string };
+
+      if (!status || status.ok !== true) {
+        return { ok: false, degraded: true, error: status?.message ?? "insert_failed" };
+      }
+
+      evictIfNeeded(store);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, degraded: true, error: error instanceof Error ? error.message : "insert_failed" };
+    }
+  });
 }
 
 export async function recall(
@@ -788,7 +871,7 @@ export async function recall(
     taskType: "RETRIEVAL_QUERY",
   });
 
-  if (!embedded.ok || embedded.vector.length === 0) {
+  if (!embedded.ok || !Array.isArray(embedded.vector) || embedded.vector.length === 0) {
     markEmbeddingFailure(store, embedded.error ?? "embedding_failed");
     return { results: [], degraded: true };
   }
@@ -954,6 +1037,12 @@ export function resetMemory(projectDir: string): void {
 
   try {
     fs.rmSync(targetPath, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+
+  try {
+    fs.rmSync(breakerStatePath(projectDir), { force: true });
   } catch {
     // ignore
   }

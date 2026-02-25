@@ -26,10 +26,29 @@ export interface EmbeddingResult {
 }
 
 let localSecretsCache: Record<string, string> | null | undefined;
+const insecurePermissionWarned = new Set<string>();
+
+function warnIfPermissionsTooOpen(filePath: string): void {
+  if (process.platform === "win32") return;
+  if (insecurePermissionWarned.has(filePath)) return;
+
+  try {
+    const stats = fs.statSync(filePath);
+    const mode = stats.mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      insecurePermissionWarned.add(filePath);
+      console.warn(`[pi-messenger][orchestrator] warning: secret file ${filePath} permissions are broad (${mode.toString(8)}). Recommend chmod 600.`);
+    }
+  } catch {
+    // best effort
+  }
+}
 
 function parseEnvFile(filePath: string): Record<string, string> {
   const out: Record<string, string> = {};
   if (!fs.existsSync(filePath)) return out;
+
+  warnIfPermissionsTooOpen(filePath);
 
   let text = "";
   try {
