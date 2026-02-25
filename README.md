@@ -129,7 +129,7 @@ Add to `~/.pi/agent/pi-messenger.json` under the `crew` key:
 | `autoKillOnDone` | Auto-terminate after `agents.done` | `true` |
 | `gracePeriodMs` | Grace period before SIGTERM | `15000` (15s) |
 | `messageBudget` | Max outgoing messages for orchestrator | `100` |
-| `memory.enabled` | Enable vector memory | `false` |
+| `memory.enabled` | Enable vector memory | `true` |
 | `memory.embeddingProvider` | `"google"` or `"openai"` | `google` |
 | `memory.embeddingModel` | Embedding model name | `gemini-embedding-001` |
 | `memory.dimensions` | Vector dimensions | `1536` |
