@@ -481,10 +481,12 @@ async function waitForMeshJoin(
   dirs: Dirs,
   timeoutMs: number,
   expectedPid?: number,
+  minRegistryMtimeMs?: number,
 ): Promise<Record<string, unknown> | null> {
   const budgetMs = Math.max(1000, timeoutMs);
   const deadline = Date.now() + budgetMs;
   const pollMs = Math.max(250, Math.min(2000, Math.floor(budgetMs / 8)));
+  const registryPath = path.join(dirs.registry, `${name}.json`);
 
   while (Date.now() < deadline) {
     const reg = readMeshRegistration(name, dirs);
@@ -492,7 +494,18 @@ async function waitForMeshJoin(
       const pid = parsePid(reg.pid);
       const pidOk = !!pid && isPidAlive(pid);
       const expectedOk = !!pid && pidMatchesExpectation(pid, expectedPid);
-      if (pidOk && expectedOk) {
+
+      let freshEnough = true;
+      if (typeof minRegistryMtimeMs === "number" && Number.isFinite(minRegistryMtimeMs)) {
+        try {
+          const stats = fs.statSync(registryPath);
+          freshEnough = stats.mtimeMs >= (minRegistryMtimeMs - 1000);
+        } catch {
+          freshEnough = false;
+        }
+      }
+
+      if (pidOk && expectedOk && freshEnough) {
         return reg;
       }
     }
@@ -537,7 +550,12 @@ async function ensureMemory(cwd: string): Promise<ReturnType<typeof getActiveMem
   }
 
   const config = loadCrewConfig(crewStore.getCrewDir(cwd));
-  return initMemory(cwd, config.orchestrator.memory);
+  try {
+    return await initMemory(cwd, config.orchestrator.memory);
+  } catch (error) {
+    console.warn(`[pi-messenger][orchestrator] memory init failed: ${error instanceof Error ? error.message : "unknown"}`);
+    return null;
+  }
 }
 
 async function maybeBootstrapMemory(
@@ -773,7 +791,7 @@ export async function executeSpawn(
     backend,
   }, cwd);
 
-  const joined = await waitForMeshJoin(name, dirs, spawnTimeoutMs, pid || undefined);
+  const joined = await waitForMeshJoin(name, dirs, spawnTimeoutMs, pid || undefined, now);
   if (!joined) {
     const diagnostics = await collectSpawnTimeoutDiagnostics(
       name,

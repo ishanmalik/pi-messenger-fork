@@ -313,20 +313,24 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
       if (!isOrchestrator()) return;
 
-      const cwd = latestCtx.cwd ?? process.cwd();
-      const reaped = checkSpawnedAgentHealth(cwd);
-      if (reaped.length > 0 && latestCtx.hasUI) {
-        for (const name of reaped) {
-          latestCtx.ui.notify(`⚠️ Spawned agent ${name} died unexpectedly`, "warning");
+      try {
+        const cwd = latestCtx.cwd ?? process.cwd();
+        const reaped = checkSpawnedAgentHealth(cwd);
+        if (reaped.length > 0 && latestCtx.hasUI) {
+          for (const name of reaped) {
+            latestCtx.ui.notify(`⚠️ Spawned agent ${name} died unexpectedly`, "warning");
+          }
         }
-      }
 
-      const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
-      const idle = checkIdleAgents(crewConfig.orchestrator.idleTimeoutMs, cwd);
-      if (idle.length > 0 && latestCtx.hasUI) {
-        for (const item of idle) {
-          latestCtx.ui.notify(`⏰ ${item.name} idle for ${item.idleFor}. Kill? agents.kill({ name: "${item.name}" })`, "info");
+        const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+        const idle = checkIdleAgents(crewConfig.orchestrator.idleTimeoutMs, cwd);
+        if (idle.length > 0 && latestCtx.hasUI) {
+          for (const item of idle) {
+            latestCtx.ui.notify(`⏰ ${item.name} idle for ${item.idleFor}. Kill? agents.kill({ name: "${item.name}" })`, "info");
+          }
         }
+      } catch (error) {
+        console.warn(`[pi-messenger][orchestrator] heartbeat monitor failed: ${error instanceof Error ? error.message : "unknown"}`);
       }
     }, STATUS_HEARTBEAT_MS);
   }
@@ -805,9 +809,13 @@ Usage (action-based API - preferred):
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
     }
 
-    const reaped = reapOrphans(cwd);
-    if (reaped.length > 0 && ctx.hasUI) {
-      ctx.ui.notify(`Reaped ${reaped.length} orphaned agent(s): ${reaped.join(", ")}`, "info");
+    try {
+      const reaped = reapOrphans(cwd);
+      if (reaped.length > 0 && ctx.hasUI) {
+        ctx.ui.notify(`Reaped ${reaped.length} orphaned agent(s): ${reaped.join(", ")}`, "info");
+      }
+    } catch (error) {
+      console.warn(`[pi-messenger][orchestrator] startup orphan reap failed: ${error instanceof Error ? error.message : "unknown"}`);
     }
 
     // Intentionally skip orchestrator memory eager-init at session startup.
@@ -1062,8 +1070,12 @@ Usage (action-based API - preferred):
   pi.on("session_shutdown", async () => {
     const cwd = process.cwd();
 
-    killAllSpawned(cwd);
-    closeMemory();
+    try {
+      killAllSpawned(cwd);
+      closeMemory();
+    } catch (error) {
+      console.warn(`[pi-messenger][orchestrator] shutdown cleanup failed: ${error instanceof Error ? error.message : "unknown"}`);
+    }
 
     shutdownLobbyWorkers(cwd);
     shutdownAllWorkers();

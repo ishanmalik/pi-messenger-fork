@@ -9,3 +9,4 @@ secrets/
 
 # orchestrator runtime artifacts
 .pi/messenger/orchestrator/
+.pi/messenger/feed.jsonl

@@ -140,6 +140,8 @@ Add to `~/.pi/agent/pi-messenger.json` under the `crew` key:
 
 For Gemini embeddings, set `GEMINI_API_KEY` via env var, `.env.local`, or `secrets/local.env`. For OpenAI, set `OPENAI_API_KEY`.
 
+> Note: `@zvec/zvec` currently ships native bindings for macOS arm64, Linux arm64, and Linux x64. On unsupported platforms, memory degrades gracefully and orchestrator features still work without vector recall.
+
 ---
 
 ## Architecture

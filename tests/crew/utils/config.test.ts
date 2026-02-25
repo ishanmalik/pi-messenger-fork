@@ -104,6 +104,8 @@ describe("crew/utils/config", () => {
     expect(cfg.orchestrator.memory.minSimilarity).toBe(0.45);
     expect(cfg.orchestrator.memory.ttlDays.message).toBe(5);
     expect(cfg.orchestrator.memory.ttlDays.discovery).toBe(30);
+    expect(cfg.orchestrator.memory.ttlDays.summary).toBe(90);
+    expect(cfg.orchestrator.memory.ttlDays.decision).toBe(90);
     expect(cfg.orchestrator.memory.embeddingModel).toBe("gemini-embedding-001");
     expect(cfg.orchestrator.memory.embeddingProvider).toBe("google");
   });

@@ -7,6 +7,7 @@ import type { SpawnedAgent, SpawnedAgentStatus, HistoryEvent } from "./types.js"
 
 const spawnedByThisProcess = new Set<string>();
 const idleNotified = new Set<string>();
+const MAX_SPAWNING_AGE_MS = 180_000;
 
 const VALID_TRANSITIONS: Record<SpawnedAgentStatus, Set<SpawnedAgentStatus>> = {
   spawning: new Set(["joined", "dead"]),
@@ -195,9 +196,13 @@ function shouldReap(agent: SpawnedAgent): string | null {
     return "pid_exited";
   }
 
-  // While still spawning, allow mesh registration to appear asynchronously.
-  // Do not reap on missing/mismatched mesh until startup completes.
+  // While still spawning, allow mesh registration to appear asynchronously,
+  // but cap how long we tolerate startup to avoid stuck registry entries.
   if (agent.status === "spawning") {
+    const spawnAgeMs = Math.max(0, Date.now() - agent.spawnedAt);
+    if (spawnAgeMs > MAX_SPAWNING_AGE_MS) {
+      return "spawn_timeout";
+    }
     return null;
   }
 
@@ -280,7 +285,8 @@ export function transitionState(
 }
 
 export function isOrchestrator(): boolean {
-  return spawnedByThisProcess.size > 0;
+  if (spawnedByThisProcess.size > 0) return true;
+  return getAllSpawned().some(agent => agent.status !== "dead");
 }
 
 export function logHistory(event: HistoryEvent, cwd: string = process.cwd()): void {
@@ -340,7 +346,7 @@ export function checkIdleAgents(
     activeIdleNames.add(agent.name);
 
     const lastActivityMs = parseLastActivityMs(agent);
-    if (lastActivityMs !== agent.lastActivityAt) {
+    if (lastActivityMs > agent.lastActivityAt) {
       registerSpawned({
         ...agent,
         lastActivityAt: lastActivityMs,
