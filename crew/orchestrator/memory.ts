@@ -708,7 +708,7 @@ export async function remember(
     taskType: "RETRIEVAL_DOCUMENT",
   });
 
-  if (!embedded.ok || embedded.vector.length === 0) {
+  if (!embedded.ok || !Array.isArray(embedded.vector) || embedded.vector.length === 0) {
     markEmbeddingFailure(store, embedded.error ?? "embedding_failed");
     return { ok: false, degraded: true, error: embedded.error ?? "embedding_failed" };
   }
