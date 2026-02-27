@@ -11,6 +11,53 @@ import type { MaxOutputConfig } from "./truncate.js";
 
 export type CoordinationLevel = "none" | "minimal" | "moderate" | "chatty";
 
+export type DataCategory = "production_work" | "smoke_test" | "off_topic" | "ops_debug";
+export type DataStorageMode = "full" | "summary" | "drop";
+export type TrainingInclusionMode = "include" | "exclude";
+export type DataRunType = "production" | "smoke" | "research" | "debug";
+
+export interface DataPolicyRule {
+  storage: DataStorageMode;
+  training: TrainingInclusionMode;
+  retentionDays: number;
+}
+
+export interface DataPolicyConfig {
+  enabled: boolean;
+  strictProjectFilter: boolean;
+  allowedProjects: string[];
+  defaultProject: string;
+  defaultCategory: DataCategory;
+  defaultRunType: DataRunType;
+  categories: Record<DataCategory, DataPolicyRule>;
+  heuristics: {
+    smokeKeywords: string[];
+    offTopicKeywords: string[];
+  };
+  ingestion: {
+    dedupeWindowMs: number;
+    summaryMaxChars: number;
+  };
+  classifier: {
+    enabled: boolean;
+    confidenceThreshold: number;
+  };
+  progress: {
+    maxRawLines: number;
+    keepRecentLines: number;
+  };
+  retention: {
+    janitorIntervalMs: number;
+    historyDays: number;
+    diagnosticsDays: number;
+    artifactsDays: number;
+  };
+  export: {
+    format: "jsonl";
+    includeDroppedMetadata: boolean;
+  };
+}
+
 const USER_CONFIG_PATH = path.join(os.homedir(), ".pi", "agent", "pi-messenger.json");
 const PROJECT_CONFIG_FILE = "config.json";
 
@@ -59,6 +106,7 @@ export interface CrewConfig {
     cleanupDays: number;
   };
   memory: { enabled: boolean };
+  dataPolicy: DataPolicyConfig;
   planSync: { enabled: boolean };
   review: { enabled: boolean; maxIterations: number };
   planning: { maxPasses: number };
@@ -117,6 +165,46 @@ const DEFAULT_CONFIG: CrewConfig = {
   },
   artifacts: { enabled: true, cleanupDays: 7 },
   memory: { enabled: false },
+  dataPolicy: {
+    enabled: true,
+    strictProjectFilter: true,
+    allowedProjects: [],
+    defaultProject: "",
+    defaultCategory: "production_work",
+    defaultRunType: "production",
+    categories: {
+      production_work: { storage: "full", training: "include", retentionDays: 3650 },
+      smoke_test: { storage: "summary", training: "exclude", retentionDays: 14 },
+      off_topic: { storage: "drop", training: "exclude", retentionDays: 3 },
+      ops_debug: { storage: "summary", training: "exclude", retentionDays: 30 },
+    },
+    heuristics: {
+      smokeKeywords: ["smoke", "probe", "tmp", "dummy", "sandbox", "test harness"],
+      offTopicKeywords: ["dspy", "how does", "what is", "general question", "unrelated", "tutorial"],
+    },
+    ingestion: {
+      dedupeWindowMs: 10000,
+      summaryMaxChars: 280,
+    },
+    classifier: {
+      enabled: true,
+      confidenceThreshold: 0.6,
+    },
+    progress: {
+      maxRawLines: 200,
+      keepRecentLines: 80,
+    },
+    retention: {
+      janitorIntervalMs: 3600000,
+      historyDays: 30,
+      diagnosticsDays: 14,
+      artifactsDays: 7,
+    },
+    export: {
+      format: "jsonl",
+      includeDroppedMetadata: false,
+    },
+  },
   planSync: { enabled: false },
   review: { enabled: true, maxIterations: 3 },
   planning: { maxPasses: 1 },
@@ -213,4 +301,52 @@ export function getTruncationForRole(config: CrewConfig, role: string): MaxOutpu
     case "analyst": return config.truncation.analysts;
     default: return config.truncation.workers;
   }
+}
+
+export interface DataPolicyDecision {
+  category: DataCategory;
+  storage: DataStorageMode;
+  retentionDays: number;
+  includeInTraining: boolean;
+}
+
+export function isProjectAllowedByDataPolicy(policy: DataPolicyConfig, project: string | undefined): boolean {
+  if (!policy.strictProjectFilter) return true;
+
+  const normalized = (project ?? "").trim();
+  const defaultProject = policy.defaultProject.trim();
+
+  if (policy.allowedProjects.length === 0 && defaultProject.length === 0) {
+    return true;
+  }
+
+  if (!normalized) {
+    return policy.allowedProjects.length === 0 && defaultProject.length === 0;
+  }
+
+  if (policy.allowedProjects.length === 0) {
+    return normalized === defaultProject;
+  }
+
+  return policy.allowedProjects.includes(normalized);
+}
+
+export function resolveDataPolicyDecision(
+  policy: DataPolicyConfig,
+  category: DataCategory | undefined,
+  project?: string,
+): DataPolicyDecision {
+  const effectiveCategory = category ?? policy.defaultCategory;
+  const fallback = policy.categories[policy.defaultCategory];
+  const rule = policy.categories[effectiveCategory] ?? fallback;
+
+  const includeInTraining = rule.training === "include"
+    && isProjectAllowedByDataPolicy(policy, project);
+
+  return {
+    category: effectiveCategory,
+    storage: rule.storage,
+    retentionDays: rule.retentionDays,
+    includeInTraining,
+  };
 }

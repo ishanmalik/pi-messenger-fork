@@ -85,4 +85,26 @@ describe("crew action router status behavior", () => {
     const text = response.content[0].text;
     expect(text).toContain("# Crew Status");
   });
+
+  it("allows data actions without requiring join", async () => {
+    const { cwd } = createTempCrewDirs();
+    const state = createTestState("AgentOne");
+    state.registered = false;
+    const dirs = createDirs(cwd);
+    const ctx = createMockContext(cwd);
+
+    const response = await executeCrewAction(
+      "data.stats",
+      {},
+      state,
+      dirs,
+      ctx,
+      () => {},
+      () => {},
+      vi.fn(),
+    );
+
+    const text = response.content[0].text;
+    expect(text).toContain("# Data Stats");
+  });
 });

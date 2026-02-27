@@ -5,7 +5,7 @@ description: Spawn, manage, and coordinate persistent worker agents with shared 
 
 # Pi-Messenger Orchestrator Skill
 
-Spawn persistent worker agents, assign tasks, communicate via DM, and manage lifecycle.
+Spawn persistent worker agents, assign tasks, communicate via DM, manage lifecycle, and capture/filter/export session data for training.
 
 ## Quick Start
 
@@ -56,11 +56,43 @@ Memory behavior is automatic when enabled:
 
 Use `workstream` tags (e.g., `cvi-wing`, `backtester`) to isolate recall context within the same repo.
 
+### 7. Data Policy + Training Corpus
+```typescript
+// Set session tags (recommended at start of a work session)
+pi_messenger({ action: "data.session", project: "bergomi2", runType: "production" })
+
+// Inspect captured corpus health (counts, categories, training-eligible totals)
+pi_messenger({ action: "data.stats" })
+
+// Export training-ready JSONL (usually filtered to your project)
+pi_messenger({ action: "data.export", project: "bergomi2", out: ".pi/messenger/data/exports/bergomi2.jsonl" })
+
+// Run retention/cleanup immediately
+pi_messenger({ action: "data.retention" })
+```
+
+`data.*` actions are local maintenance/export commands and can be run before or after mesh join.
+
+Run types:
+- `production` → intended project implementation work
+- `smoke` → smoke/probe/testing sessions
+- `research` → exploratory sessions
+- `debug` → operational troubleshooting
+
+Default category behavior (policy-driven):
+- `production_work`: full storage, training included (subject to project allowlist)
+- `smoke_test`: summary storage, excluded from training
+- `off_topic`: payload dropped (metadata only), excluded from training
+- `ops_debug`: summary storage, excluded from training
+
 ## Deterministic Smoke Test (Recommended)
 
 Use this exact sequence for orchestration validation:
 
 ```typescript
+// 0) mark this as smoke so it doesn't pollute production training corpus
+pi_messenger({ action: "data.session", project: "bergomi2", runType: "smoke" })
+
 // 1) join
 pi_messenger({ action: "join" })
 
@@ -79,6 +111,9 @@ pi_messenger({ action: "spawn", profile: "worker-xhigh", name: "SmokeWorker", th
 
 // 6) verify memory recall after respawn
 pi_messenger({ action: "agents.assign", name: "SmokeWorker", task: "Repeat smoke task and include any recalled context.", workstream: "smoke" })
+
+// 7) switch back for real project work
+pi_messenger({ action: "data.session", project: "bergomi2", runType: "production" })
 ```
 
 Expected outcomes:
@@ -87,6 +122,7 @@ Expected outcomes:
 - DM exchange appears in feed/logs.
 - Respawn succeeds with same agent name.
 - Subsequent assignment shows memory context injection when prior summaries exist.
+- `data.stats` shows smoke activity categorized away from production training data.
 
 ## Spawn Timeout Triage
 

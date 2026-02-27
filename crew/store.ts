@@ -9,6 +9,9 @@ import * as path from "node:path";
 import { execSync } from "node:child_process";
 import type { Plan, Task, TaskEvidence } from "./types.js";
 import { allocateTaskId } from "./id-allocator.js";
+import { loadCrewConfig } from "./utils/config.js";
+import { compactProgressFile } from "./data/progress.js";
+import { ingestDataEvent } from "./data/ingestion.js";
 
 // =============================================================================
 // Directory Helpers
@@ -261,6 +264,32 @@ export function appendTaskProgress(cwd: string, taskId: string, agent: string, m
   ensureDir(path.dirname(progressPath));
   const timestamp = new Date().toISOString();
   fs.appendFileSync(progressPath, `[${timestamp}] (${agent}) ${message}\n`);
+
+  try {
+    const config = loadCrewConfig(getCrewDir(cwd));
+    compactProgressFile(progressPath, {
+      maxRawLines: config.dataPolicy.progress.maxRawLines,
+      keepRecentLines: config.dataPolicy.progress.keepRecentLines,
+    });
+  } catch {
+    // best effort
+  }
+
+  try {
+    ingestDataEvent(cwd, {
+      source: "task.progress",
+      eventType: "task.progress",
+      ts: timestamp,
+      actor: agent,
+      taskId,
+      text: message,
+      metadata: {
+        progressPath,
+      },
+    });
+  } catch {
+    // best effort
+  }
 }
 
 export function getTaskProgress(cwd: string, taskId: string): string | null {

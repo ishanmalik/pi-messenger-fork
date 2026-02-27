@@ -6,6 +6,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { ingestDataEvent } from "./crew/data/ingestion.js";
 
 export type FeedEventType =
   | "join"
@@ -55,6 +56,22 @@ export function appendFeedEvent(cwd: string, event: FeedEvent): void {
       fs.mkdirSync(feedDir, { recursive: true });
     }
     fs.appendFileSync(p, JSON.stringify(event) + "\n");
+  } catch {
+    // Best effort
+  }
+
+  try {
+    ingestDataEvent(cwd, {
+      source: "feed",
+      eventType: event.type,
+      ts: event.ts,
+      actor: event.agent,
+      target: event.target,
+      text: event.preview,
+      metadata: {
+        target: event.target,
+      },
+    });
   } catch {
     // Best effort
   }

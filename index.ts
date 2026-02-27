@@ -73,6 +73,9 @@ import {
   killAllSpawned,
 } from "./crew/orchestrator/registry.js";
 import { closeMemory } from "./crew/orchestrator/memory.js";
+import { ensureDataSchemaInitialized } from "./crew/data/migration.js";
+import { initializeDataSessionTags } from "./crew/data/ingestion.js";
+import { runDataRetentionJanitor } from "./crew/data/retention.js";
 
 let overlayTui: TUI | null = null;
 let overlayHandle: OverlayHandle | null = null;
@@ -250,6 +253,16 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     for (const name of state.unreadCounts.keys()) {
       if (!activeNames.has(name)) {
         state.unreadCounts.delete(name);
+      }
+    }
+    for (const name of state.chatHistory.keys()) {
+      if (!activeNames.has(name)) {
+        state.chatHistory.delete(name);
+      }
+    }
+    for (const name of state.seenSenders.keys()) {
+      if (!activeNames.has(name)) {
+        state.seenSenders.delete(name);
       }
     }
     for (const name of notifiedStuck) {
@@ -512,7 +525,13 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "agents.logs", name: "Builder" })
   pi_messenger({ action: "agents.kill", name: "Builder" })
   pi_messenger({ action: "agents.killall" })
-  pi_messenger({ action: "agents.memory.stats" })`,
+  pi_messenger({ action: "agents.memory.stats" })
+
+  // Data pipeline
+  pi_messenger({ action: "data.session", project: "bergomi2", runType: "production" })
+  pi_messenger({ action: "data.stats" })
+  pi_messenger({ action: "data.export", project: "bergomi2", out: ".pi/messenger/data/exports/bergomi2.jsonl" })
+  pi_messenger({ action: "data.retention" })`,
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -553,6 +572,12 @@ Usage (action-based API - preferred):
       thinking: Type.Optional(Type.String({ description: "Thinking level override (e.g., high, xhigh)" })),
       task: Type.Optional(Type.String({ description: "Task description for agents.assign" })),
       lines: Type.Optional(Type.Number({ description: "Number of lines for agents.logs (default 50)" })),
+      project: Type.Optional(Type.String({ description: "Project label for data.session/data.export" })),
+      runType: Type.Optional(StringEnum(["production", "smoke", "research", "debug"], { description: "Session run type for data policy classification" })),
+      category: Type.Optional(StringEnum(["production_work", "smoke_test", "off_topic", "ops_debug"], { description: "Optional explicit category override for data ingestion clients" })),
+      out: Type.Optional(Type.String({ description: "Output path for data.export (relative to cwd if not absolute)" })),
+      minQualityScore: Type.Optional(Type.Number({ description: "Minimum quality score (0..1) for data.export" })),
+      includeDroppedMetadata: Type.Optional(Type.Boolean({ description: "Include metadata-only dropped records in data.export" })),
       cascade: Type.Optional(Type.Boolean({ description: "For task.reset - also reset dependent tasks" })),
       limit: Type.Optional(Type.Number({ description: "Number of events to return (for feed action, default 20)" })),
       paths: Type.Optional(Type.Array(Type.String(), { description: "Paths for reserve/release actions" })),
@@ -922,6 +947,17 @@ Usage (action-based API - preferred):
       console.warn(`[pi-messenger][orchestrator] startup orphan reap failed: ${error instanceof Error ? error.message : "unknown"}`);
     }
 
+    try {
+      ensureDataSchemaInitialized(cwd);
+      initializeDataSessionTags(cwd, {
+        sessionId: ctx.sessionManager.getSessionId(),
+      });
+      const crewConfig = loadCrewConfig(crewStore.getCrewDir(cwd));
+      runDataRetentionJanitor(cwd, crewConfig);
+    } catch (error) {
+      console.warn(`[pi-messenger][data] startup init failed: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+
     // Intentionally skip orchestrator memory eager-init at session startup.
     // Memory is initialized lazily when orchestrator actions actually use it.
     // This avoids cross-extension noise (e.g. subagent sessions) and reduces
@@ -1037,9 +1073,15 @@ Usage (action-based API - preferred):
 
   pi.on("session_switch", async (_event, ctx) => {
     latestCtx = ctx;
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    const cwd = ctx.cwd ?? process.cwd();
+    const { staleCleared } = restorePlanningState(cwd);
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
+    try {
+      initializeDataSessionTags(cwd, { sessionId: ctx.sessionManager.getSessionId() });
+    } catch {
+      // best effort
     }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
@@ -1047,9 +1089,15 @@ Usage (action-based API - preferred):
   });
   pi.on("session_fork", async (_event, ctx) => {
     latestCtx = ctx;
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    const cwd = ctx.cwd ?? process.cwd();
+    const { staleCleared } = restorePlanningState(cwd);
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
+    try {
+      initializeDataSessionTags(cwd, { sessionId: ctx.sessionManager.getSessionId() });
+    } catch {
+      // best effort
     }
     recoverWatcherIfNeeded();
     updateStatus(ctx);
@@ -1057,9 +1105,15 @@ Usage (action-based API - preferred):
   });
   pi.on("session_tree", async (_event, ctx) => {
     latestCtx = ctx;
-    const { staleCleared } = restorePlanningState(ctx.cwd ?? process.cwd());
+    const cwd = ctx.cwd ?? process.cwd();
+    const { staleCleared } = restorePlanningState(cwd);
     if (staleCleared && ctx.hasUI) {
       ctx.ui.notify("Stale planning state cleared (planner process exited)", "warning");
+    }
+    try {
+      initializeDataSessionTags(cwd, { sessionId: ctx.sessionManager.getSessionId() });
+    } catch {
+      // best effort
     }
     updateStatus(ctx);
     maybeAutoOpenCrewOverlay(ctx);

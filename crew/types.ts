@@ -110,6 +110,14 @@ export interface CrewParams {
   spawnTimeoutMs?: number;
   timeoutMs?: number;
 
+  // Data pipeline
+  project?: string;
+  runType?: "production" | "smoke" | "research" | "debug";
+  category?: "production_work" | "smoke_test" | "off_topic" | "ops_debug";
+  out?: string;
+  minQualityScore?: number;
+  includeDroppedMetadata?: boolean;
+
   // Task reset
   cascade?: boolean;
 

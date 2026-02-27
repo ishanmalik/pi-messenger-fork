@@ -63,6 +63,21 @@ export async function executeCrewAction(
     return handlers.executeAutoRegisterPath(params.autoRegisterPath);
   }
 
+  // data actions are local maintenance/export operations and don't require mesh registration
+  if (group === 'data') {
+    if (!op) {
+      return result("Error: data action requires operation (e.g., 'data.session', 'data.stats', 'data.export').",
+        { mode: "data", error: "missing_operation" });
+    }
+    try {
+      const dataHandlers = await import("./handlers/data.js");
+      return dataHandlers.execute(op, params, ctx);
+    } catch (e) {
+      return result(`Error: data.${op} handler failed: ${e instanceof Error ? e.message : 'unknown'}`,
+        { mode: "data", error: "handler_error", operation: op });
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   // All other actions require registration
   // ═══════════════════════════════════════════════════════════════════════

@@ -27,6 +27,7 @@ import {
 } from "../state.js";
 import { getLiveWorkers } from "../live-progress.js";
 import * as store from "../store.js";
+import { ingestDataEvent } from "../data/ingestion.js";
 
 const PRD_PATTERNS = [
   "PRD.md", "prd.md",
@@ -105,6 +106,16 @@ function appendPassToProgress(cwd: string, passNum: number, content: string): vo
   const progressPath = getProgressPath(cwd);
   const header = `### Pass ${passNum} (${formatProgressTime()})\n`;
   fs.appendFileSync(progressPath, `\n${header}${content}\n`);
+
+  ingestDataEvent(cwd, {
+    source: "system",
+    eventType: "plan.pass",
+    text: content,
+    metadata: {
+      pass: passNum,
+      progressPath,
+    },
+  });
 }
 
 function appendReviewToProgress(
@@ -116,6 +127,17 @@ function appendReviewToProgress(
   const progressPath = getProgressPath(cwd);
   const header = `### Review ${reviewNum} (${formatProgressTime()})\n`;
   fs.appendFileSync(progressPath, `\n${header}**Verdict: ${verdict}**\n${content}\n`);
+
+  ingestDataEvent(cwd, {
+    source: "system",
+    eventType: "plan.review",
+    text: content,
+    metadata: {
+      review: reviewNum,
+      verdict,
+      progressPath,
+    },
+  });
 }
 
 function notify(ctx: ExtensionContext, message: string, type: "info" | "warning" | "error" = "info"): void {

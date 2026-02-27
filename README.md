@@ -94,6 +94,10 @@ pi_messenger({ action: "agents.memory.reset" })
 | `heartbeat.pause` | Pause status heartbeat (no periodic refresh) |
 | `heartbeat.resume` | Resume status heartbeat |
 | `heartbeat.autopause` | Toggle auto-pause when idle |
+| `data.session` | Set session tags (`project`, `runType`) for filtering/export |
+| `data.stats` | Show data volume + training-eligible counts by category/project |
+| `data.export` | Export training-ready JSONL corpus (filter by `project`, `minQualityScore`) |
+| `data.retention` | Run retention/cleanup janitor now |
 
 ---
 
@@ -115,6 +119,14 @@ Add to `~/.pi/agent/pi-messenger.json` under the `crew` key:
         "embeddingProvider": "google",
         "embeddingModel": "gemini-embedding-001"
       }
+    },
+    "dataPolicy": {
+      "enabled": true,
+      "strictProjectFilter": true,
+      "defaultProject": "bergomi2",
+      "allowedProjects": ["bergomi2"],
+      "defaultCategory": "production_work",
+      "defaultRunType": "production"
     }
   }
 }
@@ -141,6 +153,32 @@ Add to `~/.pi/agent/pi-messenger.json` under the `crew` key:
 | `memory.autoInjectTopK` | Top-K recalled on assignment | `3` |
 | `memory.minSimilarity` | Min cosine similarity for recall | `0.3` |
 | `memory.ttlDays` | Per-type TTL: `message: 7`, `discovery: 30`, `summary: 90`, `decision: 90` | (see defaults) |
+| `dataPolicy.enabled` | Enable strict keep/drop rules for captured data | `true` |
+| `dataPolicy.strictProjectFilter` | Only allow configured project(s) into training exports | `true` |
+| `dataPolicy.defaultProject` | Primary project label used when context is missing | `""` |
+| `dataPolicy.allowedProjects` | Training export allowlist (empty = defaultProject only) | `[]` |
+| `dataPolicy.defaultCategory` | Fallback category for uncategorized events | `production_work` |
+| `dataPolicy.categories.production_work` | Full retention + training include policy | `{ storage: "full", training: "include", retentionDays: 3650 }` |
+| `dataPolicy.categories.smoke_test` | Summarize only, exclude from training | `{ storage: "summary", training: "exclude", retentionDays: 14 }` |
+| `dataPolicy.categories.off_topic` | Drop from retained corpus and training | `{ storage: "drop", training: "exclude", retentionDays: 3 }` |
+| `dataPolicy.categories.ops_debug` | Keep summarized operational diagnostics | `{ storage: "summary", training: "exclude", retentionDays: 30 }` |
+| `dataPolicy.ingestion.dedupeWindowMs` | De-duplicate repeated events within this window | `10000` |
+| `dataPolicy.ingestion.summaryMaxChars` | Max chars for summary-only storage mode | `280` |
+| `dataPolicy.classifier.enabled` | Enable second-pass heuristic classifier | `true` |
+| `dataPolicy.progress.maxRawLines` | Progress log compaction threshold | `200` |
+| `dataPolicy.progress.keepRecentLines` | Lines kept after progress compaction | `80` |
+| `dataPolicy.retention.historyDays` | Retention for orchestrator history log | `30` |
+| `dataPolicy.retention.diagnosticsDays` | Retention for spawn diagnostics dumps | `14` |
+| `dataPolicy.retention.artifactsDays` | Retention for crew artifact files | `7` |
+| `dataPolicy.export.format` | Training export format | `jsonl` |
+| `dataPolicy.export.includeDroppedMetadata` | Include metadata-only dropped records in exports | `false` |
+
+### Data policy categories (recommended)
+
+- `production_work`: real implementation work for your target project; keep in full and include for training.
+- `smoke_test`: probes, harness runs, temporary checks; keep only short summaries.
+- `off_topic`: unrelated Q&A (e.g., framework tutorials outside project scope); drop from retained corpus.
+- `ops_debug`: operational troubleshooting; keep summarized diagnostics for short retention.
 
 ### Messenger settings (top-level in `~/.pi/agent/pi-messenger.json`)
 

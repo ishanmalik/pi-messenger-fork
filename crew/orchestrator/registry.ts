@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { formatDuration } from "../../lib.js";
+import { ingestDataEvent } from "../data/ingestion.js";
 import type { SpawnedAgent, SpawnedAgentStatus, HistoryEvent } from "./types.js";
 
 const spawnedByThisProcess = new Set<string>();
@@ -296,6 +297,19 @@ export function logHistory(event: HistoryEvent, cwd: string = process.cwd()): vo
     fs.appendFileSync(filePath, JSON.stringify(event) + "\n");
   } catch {
     // ignore
+  }
+
+  try {
+    ingestDataEvent(cwd, {
+      source: "orchestrator.history",
+      eventType: event.event,
+      ts: event.timestamp,
+      actor: event.agent,
+      text: JSON.stringify(event.details ?? {}),
+      metadata: event.details,
+    });
+  } catch {
+    // best effort
   }
 }
 

@@ -690,6 +690,10 @@ function attemptSelfHeal(
 }
 
 export async function initMemory(projectDir: string, config: MemoryConfig): Promise<MemoryStore> {
+  if (activeStore && activeStore.projectDir !== projectDir) {
+    closeMemory(activeStore);
+  }
+
   const store = createStore(projectDir, config);
   loadBreakerState(store);
 

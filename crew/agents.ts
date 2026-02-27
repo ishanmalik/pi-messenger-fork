@@ -264,6 +264,7 @@ async function runAgent(
     }
     let gracefulShutdownRequested = false;
     let discoveredWorkerName: string | null = null;
+    let abortHandler: (() => void) | null = null;
 
     let jsonlBuffer = "";
     const events: PiEvent[] = [];
@@ -304,6 +305,11 @@ async function runAgent(
     proc.stderr?.on("data", (data) => { stderr += data.toString(); });
 
     proc.on("close", (code) => {
+      if (abortHandler && options.signal) {
+        options.signal.removeEventListener("abort", abortHandler);
+        abortHandler = null;
+      }
+
       if (task.taskId) {
         removeLiveWorker(cwd, task.taskId);
         unregisterWorker(cwd, task.taskId);
@@ -408,9 +414,10 @@ async function runAgent(
       if (options.signal.aborted) {
         gracefulShutdown().catch(() => {});
       } else {
-        options.signal.addEventListener("abort", () => {
+        abortHandler = () => {
           gracefulShutdown().catch(() => {});
-        }, { once: true });
+        };
+        options.signal.addEventListener("abort", abortHandler, { once: true });
       }
     }
   });

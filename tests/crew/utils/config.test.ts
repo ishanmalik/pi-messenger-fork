@@ -57,6 +57,8 @@ describe("crew/utils/config", () => {
     expect(cfg.truncation.workers.bytes).toBe(999);
     expect(cfg.truncation.workers.lines).toBe(123);
     expect(cfg.artifacts.enabled).toBe(true);
+    expect(cfg.dataPolicy.enabled).toBe(true);
+    expect(cfg.dataPolicy.defaultCategory).toBe("production_work");
   });
 
   it("loadCrewConfig returns defaults when user/project files are missing", async () => {
@@ -77,6 +79,14 @@ describe("crew/utils/config", () => {
     expect(cfg.orchestrator.spawnTimeoutHighThinkingMultiplier).toBe(1.5);
     expect(cfg.orchestrator.memory.enabled).toBe(true);
     expect(cfg.orchestrator.memory.dimensions).toBe(1536);
+    expect(cfg.dataPolicy.strictProjectFilter).toBe(true);
+    expect(cfg.dataPolicy.categories.production_work.storage).toBe("full");
+    expect(cfg.dataPolicy.categories.smoke_test.storage).toBe("summary");
+    expect(cfg.dataPolicy.categories.off_topic.storage).toBe("drop");
+    expect(cfg.dataPolicy.classifier.enabled).toBe(true);
+    expect(cfg.dataPolicy.ingestion.dedupeWindowMs).toBe(10000);
+    expect(cfg.dataPolicy.progress.maxRawLines).toBe(200);
+    expect(cfg.dataPolicy.export.format).toBe("jsonl");
   });
 
   it("deep merges orchestrator config without dropping nested defaults", async () => {
@@ -89,6 +99,14 @@ describe("crew/utils/config", () => {
           minSimilarity: 0.45,
           ttlDays: {
             message: 5,
+          },
+        },
+      },
+      dataPolicy: {
+        allowedProjects: ["bergomi2"],
+        categories: {
+          smoke_test: {
+            retentionDays: 2,
           },
         },
       },
@@ -108,6 +126,9 @@ describe("crew/utils/config", () => {
     expect(cfg.orchestrator.memory.ttlDays.decision).toBe(90);
     expect(cfg.orchestrator.memory.embeddingModel).toBe("gemini-embedding-001");
     expect(cfg.orchestrator.memory.embeddingProvider).toBe("google");
+    expect(cfg.dataPolicy.allowedProjects).toEqual(["bergomi2"]);
+    expect(cfg.dataPolicy.categories.smoke_test.retentionDays).toBe(2);
+    expect(cfg.dataPolicy.categories.smoke_test.storage).toBe("summary");
   });
 
   it("supports dependencies config field defaults and overrides", async () => {
@@ -211,5 +232,34 @@ describe("crew/utils/config", () => {
     expect(cfg.work.shutdownGracePeriodMs).toBe(45000);
     expect(cfg.models?.worker).toBe("model-a");
     expect(cfg.concurrency.workers).toBe(2);
+  });
+
+  it("resolveDataPolicyDecision applies strict project filtering", async () => {
+    writeJson(path.join(dirs.crewDir, "config.json"), {
+      dataPolicy: {
+        defaultProject: "bergomi2",
+      },
+    });
+
+    const { loadCrewConfig, resolveDataPolicyDecision } = await loadConfigModule();
+    const cfg = loadCrewConfig(dirs.crewDir);
+
+    const allowed = resolveDataPolicyDecision(cfg.dataPolicy, "production_work", "bergomi2");
+    const blocked = resolveDataPolicyDecision(cfg.dataPolicy, "production_work", "other-project");
+
+    expect(allowed.includeInTraining).toBe(true);
+    expect(blocked.includeInTraining).toBe(false);
+    expect(blocked.storage).toBe("full");
+  });
+
+  it("resolveDataPolicyDecision keeps off-topic out of training", async () => {
+    const { loadCrewConfig, resolveDataPolicyDecision } = await loadConfigModule();
+    const cfg = loadCrewConfig(dirs.crewDir);
+
+    const decision = resolveDataPolicyDecision(cfg.dataPolicy, "off_topic", "bergomi2");
+
+    expect(decision.includeInTraining).toBe(false);
+    expect(decision.storage).toBe("drop");
+    expect(decision.retentionDays).toBe(3);
   });
 });

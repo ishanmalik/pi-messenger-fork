@@ -6,6 +6,7 @@ import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { execSync } from "node:child_process";
+import { ingestDataEvent } from "./crew/data/ingestion.js";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
   type AgentRegistration,
@@ -971,6 +972,21 @@ export function processAllPendingMessages(
         const content = fs.readFileSync(msgPath, "utf-8");
         const msg: AgentMailMessage = JSON.parse(content);
         deliverFn(msg);
+        try {
+          ingestDataEvent(process.cwd(), {
+            source: "system",
+            eventType: "dm.receive",
+            ts: msg.timestamp,
+            actor: msg.from,
+            target: msg.to,
+            text: msg.text,
+            metadata: {
+              replyTo: msg.replyTo,
+            },
+          });
+        } catch {
+          // best effort
+        }
         fs.unlinkSync(msgPath);
       } catch {
         // On any failure (read, parse, deliver), delete to avoid infinite retry loops
@@ -1015,6 +1031,22 @@ export function sendMessageToAgent(
   const random = Math.random().toString(36).substring(2, 8);
   const msgFile = join(targetInbox, `${Date.now()}-${random}.json`);
   fs.writeFileSync(msgFile, JSON.stringify(msg, null, 2));
+
+  try {
+    ingestDataEvent(process.cwd(), {
+      source: "dm.send",
+      eventType: "message",
+      ts: msg.timestamp,
+      actor: msg.from,
+      target: msg.to,
+      text: msg.text,
+      metadata: {
+        replyTo: msg.replyTo,
+      },
+    });
+  } catch {
+    // best effort
+  }
 
   return msg;
 }
