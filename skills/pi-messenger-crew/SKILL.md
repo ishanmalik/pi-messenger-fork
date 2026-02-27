@@ -21,6 +21,14 @@ pi_messenger({ action: "list" })  // See other agents
 pi_messenger({ action: "feed" })  // Activity feed
 ```
 
+### Heartbeat Control
+```typescript
+pi_messenger({ action: "heartbeat.status" })
+pi_messenger({ action: "heartbeat.pause" })
+pi_messenger({ action: "heartbeat.resume" })
+pi_messenger({ action: "heartbeat.autopause" })  // Toggle auto-pause
+```
+
 ## Crew Workflow
 
 ### 1. Check Crew Agents

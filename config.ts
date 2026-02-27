@@ -29,6 +29,9 @@ export interface MessengerConfig {
   autoOverlay: boolean;
   autoOverlayPlanning: boolean;
   crewEventsInFeed: boolean;
+  heartbeatEnabled: boolean;
+  heartbeatIntervalMs: number;
+  heartbeatAutoPause: boolean;
 }
 
 const DEFAULT_CONFIG: MessengerConfig = {
@@ -47,6 +50,9 @@ const DEFAULT_CONFIG: MessengerConfig = {
   autoOverlay: true,
   autoOverlayPlanning: true,
   crewEventsInFeed: true,
+  heartbeatEnabled: true,
+  heartbeatIntervalMs: 15000,
+  heartbeatAutoPause: true,
 };
 
 function readJsonFile(path: string): Record<string, unknown> | null {
@@ -162,6 +168,9 @@ export function loadConfig(cwd: string): MessengerConfig {
     autoOverlay: merged.autoOverlay !== false,
     autoOverlayPlanning: merged.autoOverlayPlanning !== false,
     crewEventsInFeed: merged.crewEventsInFeed !== false,
+    heartbeatEnabled: merged.heartbeatEnabled !== false,
+    heartbeatIntervalMs: typeof merged.heartbeatIntervalMs === "number" ? merged.heartbeatIntervalMs : DEFAULT_CONFIG.heartbeatIntervalMs,
+    heartbeatAutoPause: merged.heartbeatAutoPause !== false,
   };
 
   if (merged.contextMode === "none") {

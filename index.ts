@@ -89,6 +89,10 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 
   const config: MessengerConfig = loadConfig(process.cwd());
 
+  let heartbeatEnabled = config.heartbeatEnabled;
+  let heartbeatIntervalMs = Math.max(1000, config.heartbeatIntervalMs);
+  let heartbeatAutoPause = config.heartbeatAutoPause;
+
   const state: MessengerState = {
     agentName: process.env.PI_AGENT_NAME || "",
     registered: false,
@@ -300,7 +304,55 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     }
   }
 
-  const STATUS_HEARTBEAT_MS = 15_000;
+  function getHeartbeatContext(ctx: ExtensionContext): { active: boolean; reasons: string[] } {
+    const cwd = ctx.cwd ?? process.cwd();
+    const reasons: string[] = [];
+
+    if (overlayTui || (overlayHandle && !overlayHandle.isHidden())) {
+      reasons.push("overlay");
+    }
+    if (isPlanningForCwd(cwd)) {
+      reasons.push("planning");
+    }
+    if (autonomousState.active) {
+      reasons.push("autonomous");
+    }
+    if (getLiveWorkers(cwd).size > 0) {
+      reasons.push("workers");
+    }
+    if (isOrchestrator()) {
+      reasons.push("orchestrator");
+    }
+
+    return { active: reasons.length > 0, reasons };
+  }
+
+  function shouldHeartbeatRun(ctx: ExtensionContext): boolean {
+    if (!heartbeatEnabled) return false;
+    if (!heartbeatAutoPause) return true;
+    return getHeartbeatContext(ctx).active;
+  }
+
+  function formatHeartbeatStatus(ctx: ExtensionContext): { text: string; active: boolean; reasons: string[] } {
+    const context = getHeartbeatContext(ctx);
+    const active = heartbeatEnabled && (!heartbeatAutoPause || context.active);
+    const enabledStr = heartbeatEnabled ? "enabled" : "disabled";
+    const autoPauseStr = heartbeatAutoPause ? "auto-pause on" : "auto-pause off";
+    const intervalStr = `${heartbeatIntervalMs}ms`;
+    const activeStr = active
+      ? `active (${context.reasons.length > 0 ? context.reasons.join(", ") : "manual"})`
+      : heartbeatEnabled && heartbeatAutoPause
+        ? "auto-paused (idle)"
+        : "paused";
+
+    return {
+      text: `Heartbeat: ${enabledStr} (${autoPauseStr}, interval ${intervalStr})\nStatus: ${activeStr}`,
+      active,
+      reasons: context.reasons,
+    };
+  }
+
+  const STATUS_HEARTBEAT_MS = heartbeatIntervalMs;
   let latestCtx: ExtensionContext | null = null;
   let statusHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -308,6 +360,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     if (statusHeartbeatTimer) return;
     statusHeartbeatTimer = setInterval(() => {
       if (!latestCtx) return;
+      if (!shouldHeartbeatRun(latestCtx)) return;
 
       updateStatus(latestCtx);
 
@@ -339,6 +392,49 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     if (!statusHeartbeatTimer) return;
     clearInterval(statusHeartbeatTimer);
     statusHeartbeatTimer = null;
+  }
+
+  function executeHeartbeatAction(action: string, ctx: ExtensionContext) {
+    if (!state.registered) {
+      return handlers.notRegisteredError();
+    }
+
+    const opIndex = action.indexOf(".");
+    const op = opIndex > 0 ? action.slice(opIndex + 1) : "status";
+
+    switch (op) {
+      case "pause":
+        heartbeatEnabled = false;
+        break;
+      case "resume":
+        heartbeatEnabled = true;
+        break;
+      case "autopause":
+        heartbeatAutoPause = !heartbeatAutoPause;
+        break;
+      case "status":
+        break;
+      default:
+        return {
+          content: [{ type: "text" as const, text: `Unknown heartbeat action: ${action}` }],
+          details: { mode: "heartbeat", error: "unknown_action", action }
+        };
+    }
+
+    const { text, active, reasons } = formatHeartbeatStatus(ctx);
+
+    return {
+      content: [{ type: "text" as const, text }],
+      details: {
+        mode: "heartbeat",
+        action: op,
+        enabled: heartbeatEnabled,
+        autoPause: heartbeatAutoPause,
+        intervalMs: heartbeatIntervalMs,
+        active,
+        reasons,
+      }
+    };
   }
 
   onLiveWorkersChanged(() => {
@@ -380,6 +476,10 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "set_status", message: "reviewing" })  → Set custom status
   pi_messenger({ action: "reserve", paths: ["src/"] })          → Reserve files
   pi_messenger({ action: "send", to: "Agent", message: "hi" })  → Send message
+  pi_messenger({ action: "heartbeat.status" })                   → Heartbeat status
+  pi_messenger({ action: "heartbeat.pause" })                    → Pause heartbeat
+  pi_messenger({ action: "heartbeat.resume" })                   → Resume heartbeat
+  pi_messenger({ action: "heartbeat.autopause" })                → Toggle heartbeat auto-pause
   
   // Crew: Plan from PRD
   pi_messenger({ action: "plan" })                              → Auto-discover PRD
@@ -477,6 +577,10 @@ Usage (action-based API - preferred):
       const action = params.action;
       if (!action) {
         return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
+      }
+
+      if (action === "heartbeat" || action.startsWith("heartbeat.")) {
+        return executeHeartbeatAction(action, ctx);
       }
 
       const result = await executeCrewAction(

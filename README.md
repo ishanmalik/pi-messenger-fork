@@ -90,6 +90,10 @@ pi_messenger({ action: "agents.memory.reset" })
 | `agents.killall` | Kill all spawned agents |
 | `agents.memory.stats` | Vector memory statistics |
 | `agents.memory.reset` | Wipe and reinitialize memory |
+| `heartbeat.status` | Show heartbeat status |
+| `heartbeat.pause` | Pause status heartbeat (no periodic refresh) |
+| `heartbeat.resume` | Resume status heartbeat |
+| `heartbeat.autopause` | Toggle auto-pause when idle |
 
 ---
 
@@ -137,6 +141,18 @@ Add to `~/.pi/agent/pi-messenger.json` under the `crew` key:
 | `memory.autoInjectTopK` | Top-K recalled on assignment | `3` |
 | `memory.minSimilarity` | Min cosine similarity for recall | `0.3` |
 | `memory.ttlDays` | Per-type TTL: `message: 7`, `discovery: 30`, `summary: 90`, `decision: 90` | (see defaults) |
+
+### Messenger settings (top-level in `~/.pi/agent/pi-messenger.json`)
+
+```json
+{
+  "heartbeatEnabled": true,
+  "heartbeatIntervalMs": 15000,
+  "heartbeatAutoPause": true
+}
+```
+
+When `heartbeatAutoPause` is on, the heartbeat only runs while an overlay is open, planning is active, workers are running, or orchestrator agents exist.
 
 For Gemini embeddings, set `GEMINI_API_KEY` via env var, `.env.local`, or `secrets/local.env`. For OpenAI, set `OPENAI_API_KEY`.
 
