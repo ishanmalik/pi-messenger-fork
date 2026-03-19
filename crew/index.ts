@@ -10,7 +10,7 @@ import type { MessengerState, Dirs, AgentMailMessage, NameThemeConfig } from "..
 import * as handlers from "../handlers.js";
 import type { CrewParams, AppendEntryFn } from "./types.js";
 import { result } from "./utils/result.js";
-import { isPlanningForCwd, cancelPlanningRun } from "./state.js";
+import { isPlanningForCwd, cancelPlanningRun, autonomousState, isAutonomousForCwd, stopAutonomous } from "./state.js";
 import { logFeedEvent } from "../feed.js";
 
 type DeliverFn = (msg: AgentMailMessage) => void;
@@ -219,6 +219,16 @@ export async function executeCrewAction(
     }
 
     case 'work': {
+      if (op === 'stop') {
+        const cwd = ctx.cwd ?? process.cwd();
+        if (!isAutonomousForCwd(cwd)) {
+          return result("No autonomous work running for this project.", { mode: "work.stop" });
+        }
+        stopAutonomous("manual");
+        appendEntry("crew-state", autonomousState);
+        return result("Autonomous work stopped.", { mode: "work.stop", autonomous: false });
+      }
+
       try {
         const workHandler = await import("./handlers/work.js");
         return workHandler.execute(params, dirs, ctx, appendEntry, signal);

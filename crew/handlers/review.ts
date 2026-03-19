@@ -55,7 +55,7 @@ export async function execute(
 // Implementation Review
 // =============================================================================
 
-async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string) {
+export async function reviewImplementation(cwd: string, taskId: string, modelOverride?: string) {
   const task = store.getTask(cwd, taskId);
   if (!task) {
     return result(`Error: Task ${taskId} not found.`, {

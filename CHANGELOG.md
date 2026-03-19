@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.13.2] - 2026-03-19
+
+### Added
+- **`work.stop` action** — `pi_messenger({ action: "work.stop" })` now stops autonomous Crew work for the current project and persists the stop state.
+- **Autonomous guard coverage tests** — Added targeted tests for `work.stop` routing and `agent_end` autonomous continuation guard behavior.
+
+### Fixed
+- **Autonomous continuation retry loop guard** — Autonomous Crew mode now stops itself after repeated identical `crew_continue` retries without wave progress (for example when steer turns keep aborting). The extension persists the stopped state and emits a warning instead of looping indefinitely.
+- **Persisted autonomous stop state from index-level stop paths** — `max waves` and `no ready tasks` stop paths now append `crew-state` so restored sessions do not revive stale active autonomous state.
+- **Autonomous continuation no longer runs in unregistered sessions** — If Crew autonomous state is restored but the current session is not joined to pi-messenger, the extension now stops autonomous mode and persists that stop instead of emitting repeated continuation steer messages that cannot execute.
+- **Autonomous continuation now runs only in orchestrator sessions** — Worker and lobby processes (`PI_CREW_WORKER`/`PI_LOBBY_ID`) now skip `agent_end` continuation emission to prevent repeated duplicate `crew_continue` steer loops from non-orchestrator agents.
+- **Autonomous continuation is now cwd-scoped** — `agent_end` continuation now requires the session cwd to match the active autonomous cwd (`isAutonomousForCwd`), preventing stale autonomous state from unrelated projects from triggering unexpected `crew_continue` messages.
+- **Autonomous state restore now validates owner process** — Restored active autonomous state now requires a live owner PID matching the current process; missing/dead/foreign ownership is treated as stale and auto-stopped to avoid unexpected continuation after session restore.
+- **Runtime artifact commit noise** — Added `.pi/` to `.gitignore` to avoid accidentally committing runtime files like feed artifacts.
+
+## [0.13.1] - 2026-03-14
+
+### Added
+- **Auto-review after task completion** — Workers' completed tasks now get an automatic reviewer pass before being counted as done. Controlled by existing `config.review.enabled` (default: true) and `config.review.maxIterations` (default: 3). SHIP keeps the task done, NEEDS_WORK resets it to todo for retry with review feedback injected into the next worker's prompt, MAJOR_RETHINK blocks the task. Reviews run sequentially between worker completion and wave result reporting, and respect the abort signal. Adds `review_count` to the Task interface and `task.review` to the activity feed.
+
+## [0.13.0] - 2026-03-02
+
+### Added
+- **Dynamic skill loading for crew workers** — Workers can now acquire domain-specific knowledge on demand during task execution. A three-tier discovery system scans user skills (`~/.pi/agent/skills/`), extension skills (`crew/skills/`), and project skills (`.pi/messenger/crew/skills/`) to build a skill catalog. The planner sees the catalog and can tag tasks with relevant skill names. Workers see tagged skills as "Recommended" in their prompt alongside the full catalog, and load what they need via `read()` — zero upfront token cost, no config changes. Project-level skills override extension, which override user, matching the agent override pattern. When no skills are configured, prompts are unchanged.
+
+### Fixed
+- **Artifact dir creation** — `writeArtifact`, `writeMetadata`, and `appendJsonl` now create parent directories on demand. Fixes ENOENT on first `plan` run.
+- **Multiline feed sanitization** — Feed events with embedded newlines no longer corrupt the TUI overlay layout.
+- **Config model override** — `crew.models` config now actually overrides agent defaults. Priority: task override > config > agent frontmatter.
+
 ## [0.12.1] - 2026-02-22
 
 ### Fixed

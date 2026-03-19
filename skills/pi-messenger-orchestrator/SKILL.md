@@ -7,6 +7,38 @@ description: Spawn, manage, and coordinate persistent worker agents with shared 
 
 Spawn persistent worker agents, assign tasks, communicate via DM, manage lifecycle, and capture/filter/export session data for training.
 
+## Default Operating Mode (MANDATORY)
+
+### 0) Propagate protocol to workers (required)
+- Spawned workers do **not automatically inherit this skill text**.
+- Therefore, the orchestrator must include the execution contract in every `agents.assign` task body.
+- For important tasks, require an initial `ACK` DM from the worker that repeats the contract: output-first, `BLOCKED` handling, and no `agents.done` before payload delivery.
+- You may ask workers to read this skill path explicitly, but do **not** rely on that alone; always inline critical constraints in the assignment.
+
+### 1) Hands-off orchestration by default
+- After `agents.assign`, **do not interrupt the worker via DM** unless the **user explicitly asks** you to intervene.
+- Do not send mid-task nudges like “hard stop”, “send now”, or “status now” unless user-directed.
+- Passive monitoring is allowed: `agents.check`, `agents.logs`, `feed`, `agents.list`.
+- If the worker reports `BLOCKED`, then and only then send a clarification or ask the user.
+
+### 2) Output-first completion contract (required)
+Workers must deliver requested outputs to the orchestrator **before** `agents.done`.
+
+Required sequence:
+1. Worker sends result payload (or artifact path + concise summary) to orchestrator via DM.
+2. Worker confirms completion intent (e.g., `READY_TO_DONE`).
+3. Worker calls `agents.done` with a brief summary.
+
+If blocked, worker must DM `BLOCKED: <reason>` and wait.
+
+### 3) Large-task delegation is allowed
+For large tasks, the worker may:
+- use `pi-subagents` (including `async: true`),
+- spawn additional mesh workers, or
+- ask the orchestrator to add workers.
+
+Regardless of delegation depth, the top-level worker still owes the orchestrator the final output before `agents.done`.
+
 ## Quick Start
 
 ### 1. Join the Mesh (Required)
@@ -24,17 +56,26 @@ pi_messenger({ action: "spawn", model: "anthropic/claude-opus-4-6", name: "Build
 pi_messenger({ action: "spawn", model: "openai-codex/gpt-5.3-codex", name: "Coder", thinking: "xhigh" })
 ```
 
-### 3. Assign a Task
+### 3. Assign a Task (include output-first contract)
 ```typescript
-pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement Redis caching in src/cache.py", workstream: "backtester" })
+pi_messenger({
+  action: "agents.assign",
+  name: "Builder",
+  workstream: "backtester",
+  task: "Implement Redis caching in src/cache.py.\n\nExecution contract (required):\n- First message: ACK and restate this contract in one line.\n- Deliver requested output to me via DM (payload or file path + summary) before done.\n- If blocked, DM BLOCKED:<reason> and wait.\n- Only after output delivery, call agents.done with a brief summary."
+})
 ```
 
-### 4. Communicate and Monitor
+### 4. Monitor (hands-off default)
 ```typescript
-pi_messenger({ action: "send", to: "Builder", message: "Use TTL-based invalidation" })
+// Default: passive monitoring only
 pi_messenger({ action: "agents.check", name: "Builder" })
 pi_messenger({ action: "agents.logs", name: "Builder" })
+pi_messenger({ action: "feed", limit: 20 })
 pi_messenger({ action: "agents.list" })
+
+// Only DM worker if user explicitly asks or worker is BLOCKED
+pi_messenger({ action: "send", to: "Builder", message: "<clarification>" })
 ```
 
 ### 5. Lifecycle
@@ -72,6 +113,8 @@ pi_messenger({ action: "data.retention" })
 ```
 
 `data.*` actions are local maintenance/export commands and can be run before or after mesh join.
+
+Personal operator checklist: `docs/bergomi2-orchestrator-playbook.md`
 
 Run types:
 - `production` → intended project implementation work
@@ -134,9 +177,15 @@ If spawn times out:
 
 ## Worker Completion Signal
 
-Spawned agents should call:
+Spawned agents must use output-first completion:
+
+1) Send requested result to orchestrator via DM (payload or artifact path + summary)
+2) Optionally send `READY_TO_DONE`
+3) Then call:
 ```typescript
 pi_messenger({ action: "agents.done", summary: "Brief description of what was accomplished" })
 ```
+
+Never call `agents.done` before delivering the requested output.
 
 If `autoKillOnDone` is enabled, the agent is automatically terminated after reporting done.

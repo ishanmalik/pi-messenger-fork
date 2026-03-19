@@ -35,6 +35,18 @@ Read the task spec file for detailed requirements:
 read({ path: ".pi/messenger/crew/tasks/<TASK_ID>.md" })
 ```
 
+## Phase 2.5: Load Relevant Skills
+
+If your task prompt includes an **Available Skills** section, read any that match what you're building before starting implementation.
+
+If skills are marked **Recommended for this task**, read those first.
+
+```typescript
+read({ path: "<skill-path-from-the-list>" })
+```
+
+Skip this phase if no Available Skills section is present.
+
 ## Phase 3: Start Task & Reserve Files
 
 ```typescript

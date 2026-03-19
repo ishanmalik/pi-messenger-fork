@@ -256,6 +256,7 @@ describe("crew/graceful shutdown", () => {
     state.autonomousState.stopReason = null;
     state.autonomousState.concurrency = 2;
     state.autonomousState.autoOverlayPending = false;
+    state.autonomousState.pid = null;
 
     writeWorkerAgent(dirs.cwd);
     store.createPlan(dirs.cwd, "docs/PRD.md");

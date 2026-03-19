@@ -45,6 +45,7 @@ function resetAutonomousState(): void {
   autonomousState.stopReason = null;
   autonomousState.concurrency = 2;
   autonomousState.autoOverlayPending = false;
+  autonomousState.pid = null;
 }
 
 function resetPlanningState(): void {
@@ -77,6 +78,7 @@ describe("crew/state", () => {
     expect(autonomousState.stoppedAt).toBeNull();
     expect(autonomousState.stopReason).toBeNull();
     expect(autonomousState.autoOverlayPending).toBe(true);
+    expect(autonomousState.pid).toBe(process.pid);
   });
 
   it("stopAutonomous marks inactive and records reason/timestamp", () => {
@@ -87,6 +89,7 @@ describe("crew/state", () => {
     expect(autonomousState.stopReason).toBe("manual");
     expect(autonomousState.stoppedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(autonomousState.autoOverlayPending).toBe(false);
+    expect(autonomousState.pid).toBeNull();
   });
 
   it("addWaveResult appends history and increments waveNumber", () => {
@@ -112,12 +115,39 @@ describe("crew/state", () => {
       cwd: "/tmp/project-b",
       waveNumber: 7,
       stopReason: "blocked",
+      pid: process.pid,
     });
 
     expect(autonomousState.active).toBe(true);
     expect(autonomousState.cwd).toBe("/tmp/project-b");
     expect(autonomousState.waveNumber).toBe(7);
     expect(autonomousState.stopReason).toBe("blocked");
+    expect(autonomousState.pid).toBe(process.pid);
+  });
+
+  it("restoring active autonomous state without pid clears it as stale", () => {
+    restoreAutonomousState({
+      active: true,
+      cwd: "/tmp/project-b",
+      waveNumber: 2,
+    });
+
+    expect(autonomousState.active).toBe(false);
+    expect(autonomousState.stopReason).toBe("manual");
+    expect(autonomousState.pid).toBeNull();
+  });
+
+  it("restoring active autonomous state with dead pid clears it as stale", () => {
+    restoreAutonomousState({
+      active: true,
+      cwd: "/tmp/project-b",
+      waveNumber: 2,
+      pid: 99999999,
+    });
+
+    expect(autonomousState.active).toBe(false);
+    expect(autonomousState.stopReason).toBe("manual");
+    expect(autonomousState.pid).toBeNull();
   });
 
   it("supports full transition sequence start -> waves -> stop -> restore", () => {

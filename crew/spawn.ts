@@ -8,6 +8,7 @@
 import { join } from "node:path";
 import * as store from "./store.js";
 import { loadCrewConfig } from "./utils/config.js";
+import { discoverCrewSkills } from "./utils/discover.js";
 import { buildWorkerPrompt } from "./prompt.js";
 import { logFeedEvent } from "../feed.js";
 import {
@@ -32,6 +33,7 @@ export function spawnWorkersForReadyTasks(
   const config = loadCrewConfig(crewDir);
   const prdLabel = store.getPlanLabel(plan);
   const inboxDir = join(cwd, ".pi", "messenger", "inbox");
+  const skills = discoverCrewSkills(cwd);
 
   let assigned = 0;
   let firstWorkerName: string | null = null;
@@ -44,7 +46,7 @@ export function spawnWorkersForReadyTasks(
 
     const task = fresh[0];
     const others = fresh.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
 
     store.updateTask(cwd, task.id, {
       status: "in_progress",
@@ -71,7 +73,7 @@ export function spawnWorkersForReadyTasks(
 
     const task = fresh[0];
     const others = fresh.filter(t => t.id !== task.id);
-    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+    const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
     const worker = spawnWorkerForTask(cwd, task.id, prompt);
     if (!worker) break;
 
@@ -95,9 +97,10 @@ export function spawnSingleWorker(
   const crewDir = store.getCrewDir(cwd);
   const config = loadCrewConfig(crewDir);
   const prdLabel = store.getPlanLabel(plan);
+  const skills = discoverCrewSkills(cwd);
   const readyTasks = store.getReadyTasks(cwd, { advisory: config.dependencies === "advisory" });
   const others = readyTasks.filter(t => t.id !== task.id);
-  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others);
+  const prompt = buildWorkerPrompt(task, prdLabel, cwd, config, others, skills);
   const worker = spawnWorkerForTask(cwd, taskId, prompt);
   return worker ? { name: worker.name } : null;
 }

@@ -11,7 +11,7 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import type { CrewParams } from "../types.js";
 import { result } from "../utils/result.js";
 import { spawnAgents } from "../agents.js";
-import { discoverCrewAgents } from "../utils/discover.js";
+import { discoverCrewAgents, discoverCrewSkills, type CrewSkillInfo } from "../utils/discover.js";
 import { loadCrewConfig } from "../utils/config.js";
 import { parseVerdict, type ParsedReview } from "../utils/verdict.js";
 import { logFeedEvent } from "../../feed.js";
@@ -320,6 +320,7 @@ export async function execute(
   const config = loadCrewConfig(store.getCrewDir(cwd));
   const maxPasses = Math.max(1, config.planning.maxPasses);
   const hasReviewer = availableAgents.some(a => a.name === "crew-reviewer");
+  const skills = discoverCrewSkills(cwd);
 
   const existingProgress = readProgressForPrompt(cwd);
 
@@ -349,8 +350,8 @@ export async function execute(
     notify(ctx, `Planning pass ${pass}/${maxPasses} in progress`, "info");
 
     const plannerPrompt = pass === 1
-      ? buildFirstPassPrompt(prdPath, prdContent, existingProgress, isPromptBased)
-      : buildRefinementPrompt(prdPath, prdContent, readProgressForPrompt(cwd), isPromptBased);
+      ? buildFirstPassPrompt(prdPath, prdContent, existingProgress, isPromptBased, skills)
+      : buildRefinementPrompt(prdPath, prdContent, readProgressForPrompt(cwd), isPromptBased, skills);
 
     const [plannerResult] = await spawnAgents([{
       agent: PLANNER_AGENT,
@@ -457,13 +458,13 @@ export async function execute(
     });
   }
 
-  const createdTasks: { id: string; title: string; dependsOn: string[] }[] = [];
+  const createdTasks: { id: string; title: string; dependsOn: string[]; skills?: string[] }[] = [];
   const titleToId = new Map<string, string>();
 
   for (let i = 0; i < tasks.length; i++) {
     const task = tasks[i];
     const created = store.createTask(cwd, task.title, task.description);
-    createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn });
+    createdTasks.push({ id: created.id, title: task.title, dependsOn: task.dependsOn, skills: task.skills });
     titleToId.set(task.title.toLowerCase(), created.id);
     titleToId.set(`task ${i + 1}`, created.id);
     titleToId.set(`task-${i + 1}`, created.id);
@@ -481,6 +482,10 @@ export async function execute(
       if (resolvedDeps.length > 0) {
         store.updateTask(cwd, task.id, { depends_on: resolvedDeps });
       }
+    }
+
+    if (task.skills && task.skills.length > 0) {
+      store.updateTask(cwd, task.id, { skills: task.skills });
     }
   }
 
@@ -561,19 +566,40 @@ ${nextSteps}`;
 // Prompt Builders
 // =============================================================================
 
-function buildFirstPassPrompt(prdPath: string, prdContent: string, existingProgress: string, isPromptBased: boolean): string {
+function formatSkillsForPlanner(skills: CrewSkillInfo[]): string {
+  if (skills.length === 0) return "";
+
+  const lines = skills.map(s => `  ${s.name} — ${s.description}`);
+  return `
+## Available Skills
+
+Workers can load these skills on demand during task execution. When creating tasks, you may include a \`skills\` array with relevant skill names to help workers prioritize which to read.
+
+${lines.join("\n")}
+
+`;
+}
+
+function tasksJsonFormatHint(skills: CrewSkillInfo[]): string {
+  return skills.length > 0
+    ? "title, description, dependsOn, and optionally skills (array of skill names from the Available Skills list that are relevant to the task)"
+    : "title, description, and dependsOn";
+}
+
+function buildFirstPassPrompt(prdPath: string, prdContent: string, existingProgress: string, isPromptBased: boolean, skills: CrewSkillInfo[]): string {
   const specType = isPromptBased ? "request" : "PRD";
   const specLabel = isPromptBased ? "Request" : `PRD: ${prdPath}`;
   const progressSection = existingProgress
     ? `\n## Previous Planning Context\n${existingProgress}\n`
     : "";
+  const skillsSection = formatSkillsForPlanner(skills);
 
   return `Create a task breakdown for implementing this ${specType}.
 
 ## ${specLabel}
 
 ${prdContent}
-${progressSection}
+${progressSection}${skillsSection}
 You must follow this sequence strictly:
 1) Understand the ${specType}
 2) Review relevant code/docs/reference resources
@@ -588,7 +614,7 @@ Return output in this exact section order and headings:
 
 In section 4, include both:
 - markdown task breakdown
-- a \`tasks-json\` fenced block with task objects containing title, description, and dependsOn.`;
+- a \`tasks-json\` fenced block with task objects containing ${tasksJsonFormatHint(skills)}.`;
 }
 
 function buildRefinementPrompt(
@@ -596,13 +622,15 @@ function buildRefinementPrompt(
   prdContent: string,
   progressFileContent: string,
   isPromptBased: boolean,
+  skills: CrewSkillInfo[],
 ): string {
   const specLabel = isPromptBased ? "Request" : `PRD: ${prdPath}`;
+  const skillsSection = formatSkillsForPlanner(skills);
   return `Refine your task breakdown based on review feedback.
 
 ## ${specLabel}
 ${prdContent}
-
+${skillsSection}
 ## Planning Progress
 ${progressFileContent}
 
@@ -618,7 +646,7 @@ Return output in this exact section order and headings:
 
 In section 4, include both:
 - markdown task breakdown
-- a \`tasks-json\` fenced block with task objects containing title, description, and dependsOn.`;
+- a \`tasks-json\` fenced block with task objects containing ${tasksJsonFormatHint(skills)}.`;
 }
 
 function buildPlanReviewPrompt(
@@ -674,6 +702,7 @@ interface ParsedTask {
   title: string;
   description: string;
   dependsOn: string[];
+  skills?: string[];
 }
 
 function extractPlanSections(output: string): PlanSections | null {
@@ -723,7 +752,8 @@ function parseJsonTaskBlock(output: string): ParsedTask[] | null {
       .map((t: Record<string, unknown>) => ({
         title: (t.title as string).trim(),
         description: typeof t.description === "string" ? t.description : "",
-        dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d: unknown) => typeof d === "string") : []
+        dependsOn: Array.isArray(t.dependsOn) ? t.dependsOn.filter((d: unknown) => typeof d === "string") : [],
+        skills: Array.isArray(t.skills) ? t.skills.filter((s: unknown) => typeof s === "string") : undefined,
       }));
     return tasks.length > 0 ? tasks : null;
   } catch {

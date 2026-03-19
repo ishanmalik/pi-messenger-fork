@@ -389,7 +389,7 @@ describe("config coordination", () => {
     const { loadCrewConfig } = await (async () => { vi.resetModules(); return import("../../crew/utils/config.js"); })();
     const cfg = loadCrewConfig(dirs.crewDir);
     expect(cfg.coordination).toBe("chatty");
-    expect(cfg.messageBudgets).toEqual({ none: 0, minimal: 2, moderate: 5, chatty: 10 });
+    expect(cfg.messageBudgets).toEqual({ none: 0, minimal: 20, moderate: 50, chatty: 100 });
   });
 
   it("respects coordination field from project config", async () => {

@@ -7,6 +7,7 @@
 
 import type { Task } from "./types.js";
 import type { CrewConfig } from "./utils/config.js";
+import type { CrewSkillInfo } from "./utils/discover.js";
 import * as store from "./store.js";
 import { buildDependencySection, buildCoordinationContext, buildCoordinationInstructions } from "./handlers/coordination.js";
 
@@ -16,6 +17,7 @@ export function buildWorkerPrompt(
   cwd: string,
   config: CrewConfig,
   concurrentTasks: Task[],
+  skills?: CrewSkillInfo[],
 ): string {
   const taskSpec = store.getTaskSpec(cwd, task.id);
   const planSpec = store.getPlanSpec(cwd);
@@ -108,5 +110,47 @@ ${truncatedSpec}
     prompt += coordInstructions;
   }
 
+  const skillsSection = buildSkillsSection(skills, task.skills);
+  if (skillsSection) {
+    prompt += skillsSection;
+  }
+
   return prompt;
+}
+
+function buildSkillsSection(
+  skills: CrewSkillInfo[] | undefined,
+  taskSkills: string[] | undefined,
+): string | null {
+  if (!skills || skills.length === 0) return null;
+
+  const recommended = new Set(taskSkills ?? []);
+  const recSkills = skills.filter(s => recommended.has(s.name));
+  const otherSkills = skills.filter(s => !recommended.has(s.name));
+
+  let section = `## Available Skills
+
+Read any skill that matches what you're implementing.
+
+`;
+
+  if (recSkills.length > 0) {
+    section += "**Recommended for this task:**\n";
+    for (const s of recSkills) {
+      section += `  ${s.name} — ${s.description}\n    ${s.path}\n`;
+    }
+    section += "\n";
+  }
+
+  if (otherSkills.length > 0) {
+    if (recSkills.length > 0) section += "**Also available:**\n";
+    for (const s of otherSkills) {
+      section += `  ${s.name} — ${s.description}\n    ${s.path}\n`;
+    }
+    section += "\n";
+  }
+
+  section += `To load a skill: read({ path: "<skill-path>" })\n`;
+
+  return section;
 }

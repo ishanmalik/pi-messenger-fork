@@ -143,7 +143,7 @@ Dependencies: none
 
 ### JSON format (for reliable parsing):
 
-Include this fenced block after the markdown tasks. Titles must match exactly.
+Include this fenced block after the markdown tasks. Titles must match exactly. If your prompt lists Available Skills, include a `skills` array with relevant skill names.
 
 ````
 ```tasks-json
@@ -151,12 +151,14 @@ Include this fenced block after the markdown tasks. Titles must match exactly.
   {
     "title": "Title matching ### Task 1 above",
     "description": "Full description including acceptance criteria",
-    "dependsOn": []
+    "dependsOn": [],
+    "skills": ["react-best-practices"]
   },
   {
     "title": "Title matching ### Task 2 above",
     "description": "Full description",
-    "dependsOn": ["Title matching ### Task 1 above"]
+    "dependsOn": ["Title matching ### Task 1 above"],
+    "skills": ["testing", "api-design"]
   }
 ]
 ```

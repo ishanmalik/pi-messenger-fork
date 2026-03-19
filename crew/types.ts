@@ -40,6 +40,7 @@ export interface Task {
   milestone?: boolean;
   model?: string;
   depends_on: string[];          // Task IDs this depends on
+  skills?: string[];             // Skill names from planner
   created_at: string;            // ISO timestamp
   updated_at: string;            // ISO timestamp
   started_at?: string;           // When task.start was called
@@ -50,6 +51,7 @@ export interface Task {
   evidence?: TaskEvidence;       // Evidence from task.done
   blocked_reason?: string;       // Reason from task.block
   attempt_count: number;         // How many times attempted (for auto-block)
+  review_count?: number;         // How many times reviewed
   last_review?: ReviewFeedback;  // Feedback from last review (for retry)
 }
 

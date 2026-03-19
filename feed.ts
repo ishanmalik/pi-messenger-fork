@@ -19,6 +19,7 @@ export type FeedEventType =
   | "edit"
   | "task.start"
   | "task.done"
+  | "task.review"
   | "task.block"
   | "task.unblock"
   | "task.reset"
@@ -48,6 +49,31 @@ function feedPath(cwd: string): string {
   return path.join(cwd, ".pi", "messenger", "feed.jsonl");
 }
 
+function sanitizeInlineText(value?: string): string | undefined {
+  if (!value) return undefined;
+  const normalized = value
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ")
+    .replaceAll("\t", " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function sanitizeAgentName(value: string): string {
+  return sanitizeInlineText(value) ?? "unknown";
+}
+
+export function sanitizeFeedEvent(event: FeedEvent): FeedEvent {
+  return {
+    ts: event.ts,
+    type: event.type,
+    agent: sanitizeAgentName(event.agent),
+    target: sanitizeInlineText(event.target),
+    preview: sanitizeInlineText(event.preview),
+  };
+}
+
 export function appendFeedEvent(cwd: string, event: FeedEvent): void {
   const p = feedPath(cwd);
   try {
@@ -55,7 +81,8 @@ export function appendFeedEvent(cwd: string, event: FeedEvent): void {
     if (!fs.existsSync(feedDir)) {
       fs.mkdirSync(feedDir, { recursive: true });
     }
-    fs.appendFileSync(p, JSON.stringify(event) + "\n");
+    const sanitized = sanitizeFeedEvent(event);
+    fs.appendFileSync(p, JSON.stringify(sanitized) + "\n");
   } catch {
     // Best effort
   }
@@ -88,7 +115,8 @@ export function readFeedEvents(cwd: string, limit: number = 20): FeedEvent[] {
     const events: FeedEvent[] = [];
     for (const line of lines) {
       try {
-        events.push(JSON.parse(line));
+        const parsed = JSON.parse(line) as FeedEvent;
+        events.push(sanitizeFeedEvent(parsed));
       } catch {
         // Skip malformed lines
       }
@@ -118,6 +146,7 @@ export function pruneFeed(cwd: string, maxEvents: number): void {
 const CREW_EVENT_TYPES = new Set<FeedEventType>([
   "task.start",
   "task.done",
+  "task.review",
   "task.block",
   "task.unblock",
   "task.reset",
@@ -136,25 +165,27 @@ const CREW_EVENT_TYPES = new Set<FeedEventType>([
 ]);
 
 export function formatFeedLine(event: FeedEvent): string {
-  const time = new Date(event.ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-  const isCrew = CREW_EVENT_TYPES.has(event.type);
+  const sanitized = sanitizeFeedEvent(event);
+  const time = new Date(sanitized.ts).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  const isCrew = CREW_EVENT_TYPES.has(sanitized.type);
   const prefix = isCrew ? "[Crew] " : "";
-  let line = `${time} ${prefix}${event.agent}`;
+  let line = `${time} ${prefix}${sanitized.agent}`;
 
-  const rawPreview = event.preview?.trim();
+  const rawPreview = sanitized.preview;
   const preview = rawPreview
     ? rawPreview.length > 90 ? rawPreview.slice(0, 87) + "..." : rawPreview
     : "";
   const withPreview = (base: string) => preview ? `${base} — ${preview}` : base;
+  const target = sanitized.target ?? "";
 
-  switch (event.type) {
+  switch (sanitized.type) {
     case "join": line += " joined"; break;
     case "leave": line = withPreview(line + " left"); break;
-    case "reserve": line += ` reserved ${event.target ?? ""}`; break;
-    case "release": line += ` released ${event.target ?? ""}`; break;
+    case "reserve": line += ` reserved ${target}`; break;
+    case "release": line += ` released ${target}`; break;
     case "message":
-      if (event.target) {
-        line += ` → ${event.target}`;
+      if (target) {
+        line += ` → ${target}`;
         if (preview) line += `: ${preview}`;
       } else {
         line += " ✦";
@@ -167,16 +198,17 @@ export function formatFeedLine(event: FeedEvent): string {
     case "test":
       line += preview ? ` ran tests (${preview})` : " ran tests";
       break;
-    case "edit": line += ` editing ${event.target ?? ""}`; break;
-    case "task.start": line += withPreview(` started ${event.target ?? ""}`); break;
-    case "task.done": line += withPreview(` completed ${event.target ?? ""}`); break;
-    case "task.block": line += withPreview(` blocked ${event.target ?? ""}`); break;
-    case "task.unblock": line += withPreview(` unblocked ${event.target ?? ""}`); break;
-    case "task.reset": line += withPreview(` reset ${event.target ?? ""}`); break;
-    case "task.delete": line += withPreview(` deleted ${event.target ?? ""}`); break;
-    case "task.split": line += withPreview(` split ${event.target ?? ""}`); break;
-    case "task.revise": line += withPreview(` revised ${event.target ?? ""}`); break;
-    case "task.revise-tree": line += withPreview(` revised ${event.target ?? ""} + dependents`); break;
+    case "edit": line += ` editing ${target}`; break;
+    case "task.start": line += withPreview(` started ${target}`); break;
+    case "task.done": line += withPreview(` completed ${target}`); break;
+    case "task.review": line += withPreview(` reviewed ${target}`); break;
+    case "task.block": line += withPreview(` blocked ${target}`); break;
+    case "task.unblock": line += withPreview(` unblocked ${target}`); break;
+    case "task.reset": line += withPreview(` reset ${target}`); break;
+    case "task.delete": line += withPreview(` deleted ${target}`); break;
+    case "task.split": line += withPreview(` split ${target}`); break;
+    case "task.revise": line += withPreview(` revised ${target}`); break;
+    case "task.revise-tree": line += withPreview(` revised ${target} + dependents`); break;
     case "plan.start": line += withPreview(" planning started"); break;
     case "plan.pass.start": line += withPreview(" planning pass started"); break;
     case "plan.pass.done": line += withPreview(" planning pass finished"); break;
@@ -186,7 +218,7 @@ export function formatFeedLine(event: FeedEvent): string {
     case "plan.cancel": line += " planning cancelled"; break;
     case "plan.failed": line += withPreview(" planning failed"); break;
     case "stuck": line += " appears stuck"; break;
-    default: line += ` ${event.type}`; break;
+    default: line += ` ${sanitized.type}`; break;
   }
   return line;
 }

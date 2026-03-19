@@ -1,10 +1,12 @@
 /**
- * Crew - Agent Discovery
+ * Crew - Agent & Skill Discovery
  *
- * Discovers agent definitions from extension and project directories.
+ * Discovers agent definitions and skill files from extension,
+ * project, and user directories.
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { MaxOutputConfig } from "./truncate.js";
@@ -12,6 +14,7 @@ import type { MaxOutputConfig } from "./truncate.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEFAULT_EXTENSION_AGENTS_DIR = path.resolve(__dirname, "..", "agents");
+const DEFAULT_EXTENSION_SKILLS_DIR = path.resolve(__dirname, "..", "skills");
 
 export type CrewRole = "planner" | "worker" | "reviewer" | "analyst";
 
@@ -122,4 +125,95 @@ export function discoverCrewAgents(cwd: string, extensionAgentsDir?: string): Cr
   for (const agent of projectAgents) agentMap.set(agent.name, agent);
 
   return Array.from(agentMap.values());
+}
+
+// =============================================================================
+// Skill Discovery
+// =============================================================================
+
+export interface CrewSkillInfo {
+  name: string;
+  description: string;
+  path: string;
+  source: "user" | "extension" | "project";
+}
+
+function loadSkillsFromFlatDir(dir: string, source: "extension" | "project"): CrewSkillInfo[] {
+  if (!fs.existsSync(dir)) return [];
+  const skills: CrewSkillInfo[] = [];
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.name.endsWith(".md")) continue;
+    if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+
+    const filePath = path.join(dir, entry.name);
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      continue;
+    }
+
+    const { frontmatter } = parseFrontmatter(content);
+    if (!frontmatter.name || !frontmatter.description) continue;
+
+    skills.push({
+      name: frontmatter.name as string,
+      description: (frontmatter.description as string).split("\n")[0].trim(),
+      path: filePath,
+      source,
+    });
+  }
+
+  return skills;
+}
+
+function loadSkillsFromUserDir(dir: string): CrewSkillInfo[] {
+  if (!fs.existsSync(dir)) return [];
+  const skills: CrewSkillInfo[] = [];
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+
+    const skillFile = path.join(dir, entry.name, "SKILL.md");
+    let content: string;
+    try {
+      content = fs.readFileSync(skillFile, "utf-8");
+    } catch {
+      continue;
+    }
+
+    const { frontmatter } = parseFrontmatter(content);
+    if (!frontmatter.name || !frontmatter.description) continue;
+
+    skills.push({
+      name: frontmatter.name as string,
+      description: (frontmatter.description as string).split("\n")[0].trim(),
+      path: skillFile,
+      source: "user",
+    });
+  }
+
+  return skills;
+}
+
+export function discoverCrewSkills(
+  cwd: string,
+  extensionSkillsDir?: string,
+  userSkillsDir?: string,
+): CrewSkillInfo[] {
+  const extDir = extensionSkillsDir ?? DEFAULT_EXTENSION_SKILLS_DIR;
+  const projectSkillsDir = path.join(cwd, ".pi", "messenger", "crew", "skills");
+  const userDir = userSkillsDir ?? path.join(os.homedir(), ".pi", "agent", "skills");
+
+  const userSkills = loadSkillsFromUserDir(userDir);
+  const extensionSkills = loadSkillsFromFlatDir(extDir, "extension");
+  const projectSkills = loadSkillsFromFlatDir(projectSkillsDir, "project");
+
+  const skillMap = new Map<string, CrewSkillInfo>();
+  for (const skill of userSkills) skillMap.set(skill.name, skill);
+  for (const skill of extensionSkills) skillMap.set(skill.name, skill);
+  for (const skill of projectSkills) skillMap.set(skill.name, skill);
+
+  return Array.from(skillMap.values());
 }

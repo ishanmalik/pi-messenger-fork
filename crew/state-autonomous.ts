@@ -25,6 +25,7 @@ export interface AutonomousState {
   stopReason: "completed" | "blocked" | "manual" | null;
   concurrency: number;
   autoOverlayPending: boolean;
+  pid: number | null;
 }
 
 export const autonomousState: AutonomousState = {
@@ -37,10 +38,20 @@ export const autonomousState: AutonomousState = {
   stopReason: null,
   concurrency: 2,
   autoOverlayPending: false,
+  pid: null,
 };
 
 export const MIN_CONCURRENCY = 1;
 export const MAX_CONCURRENCY = 10;
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export function clampConcurrency(value: number, configMax?: number): number {
   if (!Number.isFinite(value)) return MIN_CONCURRENCY;
@@ -79,6 +90,7 @@ export function startAutonomous(cwd: string, concurrency: number): void {
   autonomousState.stopReason = null;
   autonomousState.concurrency = clampConcurrency(concurrency);
   autonomousState.autoOverlayPending = true;
+  autonomousState.pid = process.pid;
 }
 
 export function stopAutonomous(reason: "completed" | "blocked" | "manual"): void {
@@ -86,6 +98,7 @@ export function stopAutonomous(reason: "completed" | "blocked" | "manual"): void
   autonomousState.autoOverlayPending = false;
   autonomousState.stoppedAt = new Date().toISOString();
   autonomousState.stopReason = reason;
+  autonomousState.pid = null;
 }
 
 export function addWaveResult(result: WaveResult): void {
@@ -105,6 +118,23 @@ export function restoreAutonomousState(data: Partial<AutonomousState>): void {
   if (data.stopReason !== undefined) autonomousState.stopReason = data.stopReason;
   if (data.concurrency !== undefined) {
     autonomousState.concurrency = clampConcurrency(Number(data.concurrency));
+  }
+  if (data.pid !== undefined) {
+    autonomousState.pid = typeof data.pid === "number" ? data.pid : null;
+  }
+
+  if (!autonomousState.active) return;
+
+  const ownerPid = autonomousState.pid;
+  const sameProcess = ownerPid === process.pid;
+  const ownerAlive = typeof ownerPid === "number" && isProcessAlive(ownerPid);
+
+  if (!sameProcess || !ownerAlive) {
+    autonomousState.active = false;
+    autonomousState.autoOverlayPending = false;
+    autonomousState.stopReason = autonomousState.stopReason ?? "manual";
+    autonomousState.stoppedAt = autonomousState.stoppedAt ?? new Date().toISOString();
+    autonomousState.pid = null;
   }
 }
 

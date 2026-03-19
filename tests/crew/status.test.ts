@@ -25,6 +25,7 @@ function resetAutonomousState(): void {
   autonomousState.stoppedAt = null;
   autonomousState.stopReason = null;
   autonomousState.autoOverlayPending = false;
+  autonomousState.pid = null;
 }
 
 function writeCrewDependenciesConfig(cwd: string, dependencies: "advisory" | "strict"): void {
