@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-04-04
+
+### Changed
+- Added a `promptSnippet` for `pi_messenger` so Pi 0.59+ includes it in the default tool prompt section and reliably surfaces Crew/coordination workflows.
+
+## [0.14.0] - 2026-04-03
+
+### Added
+- **`leave` action** — `pi_messenger({ action: "leave" })` now lets the current session leave the mesh without restarting pi. It releases reservations, auto-unclaims the session's active swarm claim, closes the messenger overlay, and allows later rejoin from the same session.
+
+### Fixed
+- **Leave guardrails for Crew state** — `leave` now refuses while project planning, autonomous work, or session-owned in-progress Crew tasks are still active, preventing stranded coordination state.
+- **Immutable-session cwd handling** — Registration, folder scoping, auto-register path matching, and messenger context now follow the live session cwd after pi runtime/session replacement instead of relying on `process.cwd()`.
+
 ## [0.13.2] - 2026-03-19
 
 ### Added

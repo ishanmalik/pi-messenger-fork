@@ -21,6 +21,7 @@ function createTestState(agentName: string): MessengerState {
     broadcastHistory: [],
     seenSenders: new Map(),
     model: "test-model",
+    cwd: process.cwd(),
     gitBranch: undefined,
     spec: undefined,
     scopeToFolder: false,

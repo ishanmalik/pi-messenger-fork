@@ -73,6 +73,7 @@ export interface MessengerState {
   broadcastHistory: AgentMailMessage[];
   seenSenders: Map<string, string>;
   model: string;
+  cwd: string;
   gitBranch?: string;
   spec?: string;
   scopeToFolder: boolean;
@@ -388,8 +389,8 @@ export function buildSelfRegistration(state: MessengerState): AgentRegistration 
     name: state.agentName,
     pid: process.pid,
     sessionId: "",
-    cwd: process.cwd(),
     model: state.model,
+    cwd: state.cwd,
     startedAt: state.sessionStartedAt,
     gitBranch: state.gitBranch,
     spec: state.spec,

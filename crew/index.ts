@@ -92,6 +92,9 @@ export async function executeCrewAction(
     case 'status':
       return handlers.executeStatus(state, dirs, ctx.cwd ?? process.cwd());
 
+    case 'leave':
+      return handlers.executeLeave(state, dirs, ctx);
+
     case 'list':
       return handlers.executeList(state, dirs, ctx.cwd ?? process.cwd(), { stuckThreshold: config?.stuckThreshold });
 

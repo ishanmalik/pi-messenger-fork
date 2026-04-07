@@ -91,7 +91,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // State & Configuration
   // ===========================================================================
 
-  const config: MessengerConfig = loadConfig(process.cwd());
+  let config: MessengerConfig = loadConfig(process.cwd());
 
   let heartbeatEnabled = config.heartbeatEnabled;
   let heartbeatIntervalMs = Math.max(1000, config.heartbeatIntervalMs);
@@ -110,6 +110,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
     broadcastHistory: [],
     seenSenders: new Map(),
     model: "",
+    cwd: process.cwd(),
     gitBranch: undefined,
     spec: undefined,
     scopeToFolder: config.scopeToFolder,
@@ -478,7 +479,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
   // ===========================================================================
 
   function sendRegistrationContext(ctx: ExtensionContext): void {
-    const folder = extractFolder(process.cwd());
+    const folder = extractFolder(ctx.cwd ?? state.cwd);
     const locationPart = state.gitBranch
       ? `${folder} on ${state.gitBranch}`
       : folder;
@@ -501,6 +502,7 @@ export default function piMessengerExtension(pi: ExtensionAPI) {
 Usage (action-based API - preferred):
   // Coordination
   pi_messenger({ action: "join" })                              → Join mesh
+  pi_messenger({ action: "leave" })                             → Leave mesh for this session
   pi_messenger({ action: "status" })                            → Get status
   pi_messenger({ action: "list" })                              → List agents with presence
   pi_messenger({ action: "feed", limit: 20 })                   → Activity feed
@@ -552,6 +554,8 @@ Usage (action-based API - preferred):
   pi_messenger({ action: "data.stats" })
   pi_messenger({ action: "data.export", project: "bergomi2", out: ".pi/messenger/data/exports/bergomi2.jsonl" })
   pi_messenger({ action: "data.retention" })`,
+    promptSnippet:
+      "Use for multi-agent coordination and Crew workflows: join/status/feed, create plans, run work waves, manage tasks, reserve files, message agents, and orchestrate persistent spawned workers.",
     parameters: Type.Object({
       action: Type.Optional(Type.String({
         description: "Action to perform (e.g., 'join', 'plan', 'work', 'task.start')"
@@ -643,6 +647,13 @@ Usage (action-based API - preferred):
 
       if (action === "join" && state.registered && config.registrationContext) {
         sendRegistrationContext(ctx);
+      }
+
+      if (action === "leave" && !state.registered) {
+        overlayHandle?.hide();
+        overlayHandle = null;
+        overlayTui = null;
+        overlayOpening = false;
       }
 
       return result;
@@ -946,6 +957,11 @@ Usage (action-based API - preferred):
 
   pi.on("session_start", async (_event, ctx) => {
     latestCtx = ctx;
+    state.cwd = ctx.cwd ?? process.cwd();
+    config = loadConfig(state.cwd);
+    state.scopeToFolder = config.scopeToFolder;
+    nameTheme.theme = config.nameTheme;
+    nameTheme.customWords = config.nameWords;
     resetAutonomousContinueGuard();
     startStatusHeartbeat();
     for (const entry of ctx.sessionManager.getEntries()) {
@@ -988,7 +1004,7 @@ Usage (action-based API - preferred):
     try { fs.rmSync(join(homedir(), ".pi/agent/messenger/feed.jsonl"), { force: true }); } catch {}
 
     const shouldAutoRegister = config.autoRegister || 
-      matchesAutoRegisterPath(process.cwd(), config.autoRegisterPaths);
+      matchesAutoRegisterPath(state.cwd, config.autoRegisterPaths);
 
     if (!shouldAutoRegister) {
       maybeAutoOpenCrewOverlay(ctx);
@@ -996,7 +1012,7 @@ Usage (action-based API - preferred):
     }
 
     if (store.register(state, dirs, ctx, nameTheme)) {
-      const cwd = ctx.cwd ?? process.cwd();
+      const cwd = state.cwd;
       store.startWatcher(state, dirs, deliverMessage);
       updateStatus(ctx);
       pruneFeed(cwd, config.feedRetention);
@@ -1331,7 +1347,12 @@ Usage (action-based API - preferred):
     if (recentTestTimer) { clearTimeout(recentTestTimer); recentTestTimer = null; }
     if (recentEditTimer) { clearTimeout(recentEditTimer); recentEditTimer = null; }
     store.stopWatcher(state);
-    store.unregister(state, dirs);
+    try {
+      store.unregister(state, dirs);
+    } catch {
+      // Safe to ignore during shutdown: the process is exiting, so any leftover
+      // registration will be cleaned up as stale on the next registry read.
+    }
   });
 
   // ===========================================================================

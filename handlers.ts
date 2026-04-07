@@ -26,6 +26,7 @@ import * as store from "./store.js";
 import * as crewStore from "./crew/store.js";
 import { getAutoRegisterPaths, saveAutoRegisterPaths, matchesAutoRegisterPath } from "./config.js";
 import { readFeedEvents, logFeedEvent, pruneFeed, formatFeedLine, isCrewEvent, type FeedEvent } from "./feed.js";
+import { isAutonomousForCwd, isPlanningForCwd } from "./crew/state.js";
 import { loadCrewConfig } from "./crew/utils/config.js";
 import { isOrchestrator } from "./crew/orchestrator/registry.js";
 
@@ -126,6 +127,118 @@ export function executeJoin(
     peers: agents.map(a => a.name),
     spec: state.spec ? displaySpecPath(state.spec, cwd) : undefined
   });
+}
+
+export async function executeLeave(
+  state: MessengerState,
+  dirs: Dirs,
+  ctx: ExtensionContext,
+) {
+  if (!state.registered) {
+    return notRegisteredError();
+  }
+
+  const cwd = ctx.cwd ?? process.cwd();
+
+  if (isPlanningForCwd(cwd)) {
+    return result(
+      "Cannot leave while Crew planning is active for this project. Cancel it first with pi_messenger({ action: \"plan.cancel\" }).",
+      { mode: "leave", error: "planning_active" }
+    );
+  }
+
+  if (isAutonomousForCwd(cwd)) {
+    return result(
+      "Cannot leave while autonomous Crew work is active for this project. Stop it first with pi_messenger({ action: \"work.stop\" }).",
+      { mode: "leave", error: "autonomous_active" }
+    );
+  }
+
+  const inProgressTasks = crewStore
+    .getTasks(cwd)
+    .filter(task => task.status === "in_progress" && task.assigned_to === state.agentName)
+    .map(task => task.id);
+
+  if (inProgressTasks.length > 0) {
+    return result(
+      `Cannot leave while Crew task${inProgressTasks.length === 1 ? "" : "s"} assigned to you ${inProgressTasks.length === 1 ? "is" : "are"} still in progress: ${inProgressTasks.join(", ")}. Finish, block, or reset ${inProgressTasks.length === 1 ? "it" : "them"} first.`,
+      { mode: "leave", error: "crew_tasks_in_progress", taskIds: inProgressTasks }
+    );
+  }
+
+  const activeClaim = store.getAgentCurrentClaim(dirs, state.agentName);
+  let releasedClaim: { spec: string; taskId: string; reason?: string } | undefined;
+  if (activeClaim) {
+    const claimDisplay = displaySpecPath(activeClaim.spec, cwd);
+    try {
+      const unclaimResult = await store.unclaimTask(dirs, activeClaim.spec, activeClaim.taskId, state.agentName);
+      if (!store.isUnclaimSuccess(unclaimResult)) {
+        return result(
+          `Cannot leave because the active swarm claim ${activeClaim.taskId} in ${claimDisplay} could not be released. Resolve it first and retry.`,
+          {
+            mode: "leave",
+            error: unclaimResult.error,
+            activeClaim: { ...activeClaim, spec: claimDisplay },
+            ...(store.isUnclaimNotYours(unclaimResult) ? { claimedBy: unclaimResult.claimedBy } : {}),
+          }
+        );
+      }
+      releasedClaim = activeClaim;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return result(
+        `Cannot leave because the active swarm claim ${activeClaim.taskId} in ${claimDisplay} could not be released: ${message}`,
+        {
+          mode: "leave",
+          error: "unclaim_failed",
+          message,
+          activeClaim: { ...activeClaim, spec: claimDisplay },
+        }
+      );
+    }
+  }
+
+  const releasedReservations = state.reservations.map(r => r.pattern);
+  state.reservations = [];
+  store.updateRegistration(state, dirs, ctx);
+  for (const pattern of releasedReservations) {
+    logFeedEvent(cwd, state.agentName, "release", pattern);
+  }
+
+  try {
+    store.unregister(state, dirs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return result(
+      `Could not leave pi-messenger: ${message}`,
+      { mode: "leave", error: "unregister_failed", message }
+    );
+  }
+
+  logFeedEvent(cwd, state.agentName, "leave");
+  store.stopWatcher(state);
+
+  if (ctx.hasUI) {
+    ctx.ui.setStatus("messenger", undefined);
+  }
+
+  const claimText = releasedClaim
+    ? `\nReleased claim: ${releasedClaim.taskId} in ${displaySpecPath(releasedClaim.spec, cwd)}`
+    : "";
+
+  return result(
+    `Left pi-messenger.${releasedReservations.length > 0 ? `\nReleased reservations: ${releasedReservations.join(", ")}` : ""}${claimText}`,
+    {
+      mode: "leave",
+      releasedReservations,
+      releasedClaim: releasedClaim
+        ? {
+            ...releasedClaim,
+            spec: displaySpecPath(releasedClaim.spec, cwd),
+          }
+        : undefined,
+    }
+  );
 }
 
 export function executeStatus(state: MessengerState, dirs: Dirs, cwd: string = process.cwd()) {

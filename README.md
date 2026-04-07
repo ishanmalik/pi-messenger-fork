@@ -70,29 +70,37 @@ npx pi-messenger --crew-uninstall
 // 1. Join mesh
 pi_messenger({ action: "join" })
 
-// 2. Spawn a worker (tmux pane by default)
+// 2. Core mesh coordination
+pi_messenger({ action: "reserve", paths: ["src/auth/"], reason: "Refactoring" })
+pi_messenger({ action: "send", to: "GoldFalcon", message: "auth is done" })
+pi_messenger({ action: "release" })
+
+// 3. Spawn a worker (tmux pane by default)
 pi_messenger({ action: "spawn", profile: "worker-xhigh", name: "Builder" })
 // or: pi_messenger({ action: "spawn", model: "anthropic/claude-sonnet-4-6", name: "Builder", thinking: "high" })
 
-// 3. Assign a task (memory auto-injected if enabled)
+// 4. Assign a task (memory auto-injected if enabled)
 pi_messenger({ action: "agents.assign", name: "Builder", task: "Implement Redis caching", workstream: "backend" })
 
-// 4. Communicate & monitor
+// 5. Communicate & monitor
 pi_messenger({ action: "send", to: "Builder", message: "Use TTL-based invalidation" })
 pi_messenger({ action: "agents.check", name: "Builder" })
 pi_messenger({ action: "agents.logs", name: "Builder" })
 
-// 5. Worker signals completion (auto-killed if configured, summary stored in memory)
+// 6. Worker signals completion (auto-killed if configured, summary stored in memory)
 // (called by the worker): pi_messenger({ action: "agents.done", summary: "Implemented Redis caching with 5-min TTL" })
 
-// 6. Lifecycle
+// 7. Lifecycle
 pi_messenger({ action: "agents.kill", name: "Builder" })
 pi_messenger({ action: "agents.killall" })
 pi_messenger({ action: "agents.attach", name: "Builder" })  // attach to tmux pane
 
-// 7. Memory
+// 8. Memory
 pi_messenger({ action: "agents.memory.stats" })
 pi_messenger({ action: "agents.memory.reset" })
+
+// 9. Leave mesh when done
+pi_messenger({ action: "leave" })
 ```
 
 For multi-agent task orchestration from a PRD:
@@ -113,7 +121,7 @@ pi_messenger({ action: "review", target: "task-1" })    // Reviewer checks imple
 
 **Messaging** - Send messages between agents. Recipients wake up immediately and see the message as a steering prompt.
 
-**File Reservations** - Claim files or directories. Other agents get blocked with a clear message telling them who to coordinate with. Auto-releases on exit.
+**File Reservations** - Claim files or directories. Other agents get blocked with a clear message telling them who to coordinate with. Auto-releases on `leave` or exit.
 
 **Stuck Detection** - Agents idle too long with an open task or reservation are flagged as stuck. Peers get a notification.
 
@@ -296,6 +304,18 @@ Agent definitions live in `crew/agents/` within the extension. To customize one 
 
 | Action | Description |
 |--------|-------------|
+| `join` | Join the agent mesh |
+| `leave` | Leave the mesh for the current session |
+| `list` | List agents with presence info |
+| `status` | Show your status or crew progress |
+| `whois` | Detailed info about an agent (`name` required) |
+| `feed` | Show activity feed (`limit` optional, default: 20) |
+| `set_status` | Set custom status message (`message` optional — omit to clear) |
+| `send` | Send DM (`to` + `message` required) |
+| `broadcast` | Broadcast to all (`message` required) |
+| `reserve` | Reserve files (`paths` required, `reason` optional) |
+| `release` | Release reservations (`paths` optional — omit to release all) |
+| `rename` | Change your name (`name` required) |
 | `spawn` | Spawn a worker (`name` required; `profile`, `model`, `thinking`, `workstream` optional) |
 | `agents.list` | List all spawned agents with lifecycle state |
 | `agents.assign` | Assign a task (`name` + `task` required, `workstream` optional) |

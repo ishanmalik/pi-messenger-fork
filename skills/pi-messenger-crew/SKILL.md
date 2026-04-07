@@ -9,9 +9,10 @@ Use pi-messenger for multi-agent coordination and Crew task orchestration.
 
 ## Quick Reference
 
-### Join the Mesh (Required First)
+### Join or Leave the Mesh
 ```typescript
 pi_messenger({ action: "join" })
+pi_messenger({ action: "leave" })
 ```
 
 ### Check Status
